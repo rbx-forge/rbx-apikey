@@ -486,7 +486,7 @@ async fn allowlist_section(cli: &DoctorCli, facts: &Facts, echo: &ip::IpEcho) ->
              third-party echo service ({}) for an address this machine cannot read off its \
              own interfaces, so it is opt-in: re-run with `--check-ip`. A stale entry here \
              fails as an opaque 401 that looks exactly like a wrong key, so check it first \
-             when a call that should work does not. See docs/doctor.md.",
+             when a call that should work does not. See https://github.com/rbx-forge/rbx-apikey/blob/main/docs/doctor.md",
             echo.host()
         )));
         return s;

@@ -1,6 +1,6 @@
 # rbx-apikey
 
-Manage Roblox Open Cloud API keys declaratively from `rbxapikey.toml`. Supports multiple secret backends (lockfile, custom file) and automatic scope validation against Roblox's live API.
+Manage Roblox Open Cloud API keys declaratively from `rbxapikey.toml`. Supports multiple secret backends (lockfile, custom file) and scope validation against a catalog of Roblox scopes built into the binary.
 
 ## Features
 
@@ -85,6 +85,7 @@ Because the catalog is embedded at compile time and the service's list is live, 
 
 **Expiration colors:**
 - Green - Expires in >30 days (healthy)
+- Cyan - Expires in 7 to 30 days
 - Yellow - Expires in <7 days (rotate soon)
 - Red - Already expired or missing secret
 
@@ -116,7 +117,7 @@ envs = ["dev", "prod"]                       # resolves to universe_ids via rbxp
 scopes = ["asset:read,write", "universe:read"]
 expiration_months = 3                        # 3 months from now
 # or: expiration_days = 90                   # 90 days from now (more precise)
-# or: expires_at = "2025-12-31T00:00:00Z"    # exact date (ISO 8601)
+# or: expires_at = "2027-12-31T00:00:00Z"    # exact date (ISO 8601)
 ```
 
 ### Without `rbxplace.toml`
@@ -180,7 +181,7 @@ An empty group (`ci = []`) is refused too. A key targeting no universe is scoped
 
 ### Duplicate scopes
 
-A scope written twice is collapsed on the way in, at both levels (`["asset:read", "asset:read"]` and `["asset:read,read"]` alike) and the collapse is reported on stderr, naming the table and the entry. First-seen order survives, so what you read back from `apikey introspect` is in the order your file wrote.
+A scope written twice is collapsed on the way in, at both levels (`["asset:read", "asset:read"]` and `["asset:read,read"]` alike) and the collapse is reported on stderr, naming the table and the entry. First-seen order survives, so what you read back from `rbx-apikey introspect` is in the order your file wrote.
 
 Collapsing is safe: a duplicate grants nothing extra, it only makes the payload Roblox is asked to store redundant. It is reported rather than dropped in silence because it is almost always a merge artefact, and the line it was meant to be is worth a look.
 
@@ -217,7 +218,7 @@ To acknowledge an intentional change, delete that key's entry from `rbxapikey.lo
 - `enabled` - (optional) `true`/`false` to enable/disable the key (defaults to `settings.default_enabled`)
 - `expiration_months` - (optional) Months until key expires
 - `expiration_days` - (optional) Days until key expires (more precise than months)
-- `expires_at` - (optional) Exact expiration date in ISO 8601 format (e.g., `"2025-12-31T00:00:00Z"`); all three expiration fields are mutually exclusive (priority: `expires_at` > `expiration_days` > `expiration_months` > global default); omit all for keys that never expire
+- `expires_at` - (optional) Exact expiration date in ISO 8601 format (e.g., `"2027-12-31T00:00:00Z"`); all three expiration fields are mutually exclusive (priority: `expires_at` > `expiration_days` > `expiration_months` > global default); omit all for keys that never expire
 - `allowed_cidrs` - (optional) List of IP CIDR blocks allowed to use this key (defaults to `settings.default_allowed_cidrs`)
 - `secret_file` - (optional) Custom file path to store the secret (defaults to lockfile). Templated like `default_secret_file`: `{name}` is the key name, `{env_group}` its env group. A fan-out declaration needs one of the two in the path, or its keys would share one file.
 - `datastores` - (optional) Array of datastore restrictions (fine-grained datastore scopes by universe and name)
@@ -313,7 +314,7 @@ Studio detection is **opt-in**: `--auto-cookie` is the standing yes, an interact
 
 **In CI, that last rule means `--auto-cookie` is not the answer**: there is no Studio on a runner, and a runner that happens to have one must not reach into it. Every write verb here (`create`, `update`, `regenerate`, `delete`, `prune`) requires a cookie, so a scheduled `rbx-apikey create --all` needs `RBX_COOKIE` from a secret store. Prefer arranging the pipeline so none of these run there at all: the keys they mint are the credential CI should be *using*, not making.
 
-A session cookie is a full-account credential, strictly more powerful than the scoped keys this command creates, so it is handled accordingly:
+A session cookie is a full-account credential, strictly more powerful than the scoped keys this tool creates, so it is handled accordingly:
 
 - **One resolution order.** `--cookie`, then `RBX_COOKIE`, then a signed-in Studio if the rule above allows it. An explicit value always wins, and `--no-auto-cookie` never suppresses it: that flag governs detection, not what you typed.
 - **It says when it borrows.** When the Studio session is used, one line on stderr says so and names the flags that stop it.
@@ -372,7 +373,7 @@ Three commands answer three different questions, and only the last one can see a
 | `status --remote` | Is what this project declares still there? | one `GET` per lockfile entry |
 | `list --remote` | What does the **account** actually hold? | one listing call, everything |
 
-The gap the third one fills is the one nobody expects to be wide. An account used for any length of time accumulates keys from other checkouts, from other tools, and from clicking through the Creator Hub, and the project you are standing in tracks none of them. Nothing else in the CLI can see them.
+The gap the third one fills is the one nobody expects to be wide. An account used for any length of time accumulates keys from other checkouts, from other tools, and from clicking through the Creator Hub, and the project you are standing in tracks none of them. Nothing else in this tool can see them.
 
 ```text
 API keys on Roblox for user 1234567890 (12 total):
@@ -419,7 +420,7 @@ POST https://apis.roblox.com/cloud-authentication/v1/apiKeys
 → {"cloudAuthInfo": [...], "nextCursor": "id_…", "previousCursor": "id_…"}
 ```
 
-It is a **POST that reads**, and the resource is plural. Every `GET` spelling returns 404, and `GET /v1/apiKey/list` answers `Malformed CloudAuthId` because `list` lands in the by-id route. Cookie auth plus CSRF, like the rest of this crate. Found in the Creator Hub's own bundle (`getApiKeys` → `v1ApiKeysPost`) and confirmed against the live API and the browser's network log.
+It is a **POST that reads**, and the resource is plural. Every `GET` spelling returns 404, and `GET /v1/apiKey/list` answers `Malformed CloudAuthId` because `list` lands in the by-id route. Cookie auth plus CSRF, like the rest of this tool. Found in the Creator Hub's own bundle (`getApiKeys` → `v1ApiKeysPost`) and confirmed against the live API and the browser's network log.
 
 ## Machine-readable output
 

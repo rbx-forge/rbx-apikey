@@ -67,7 +67,7 @@ pub enum ApikeyCommands {
         #[arg(long)]
         all: bool,
 
-        /// Allow all IPs (default: restrict to current public IP / configured CIDRs).
+        /// Allow calls from any IP. Without it, the key needs `allowed_cidrs` or `default_allowed_cidrs`.
         #[arg(long = "no-ip")]
         no_ip: bool,
 
@@ -136,7 +136,7 @@ pub enum ApikeyCommands {
         /// secret, a piece of one, or the path to the file holding one, not
         /// even the Creator Hub's preview column. stdout carries the document
         /// and nothing else; notes and warnings stay on stderr. Field names are
-        /// documented in docs/apikey.md.
+        /// documented in <https://github.com/rbx-forge/rbx-apikey/blob/main/docs/apikey.md>.
         ///
         /// Refused with --expiry-only, which is a narrower rendering of the
         /// same rows and has no document of its own.
@@ -189,7 +189,7 @@ pub enum ApikeyCommands {
         /// secret and no free-text advice: the status word says what the
         /// sentence said. stdout carries the document and nothing else; notes
         /// and warnings stay on stderr. Field names are documented in
-        /// docs/apikey.md.
+        /// <https://github.com/rbx-forge/rbx-apikey/blob/main/docs/apikey.md>.
         #[arg(long)]
         json: bool,
     },
@@ -203,7 +203,7 @@ pub enum ApikeyCommands {
         #[arg(long)]
         all: bool,
 
-        /// Allow all IPs (default: restrict to current public IP / configured CIDRs).
+        /// Allow calls from any IP. Without it, the key needs `allowed_cidrs` or `default_allowed_cidrs`.
         #[arg(long = "no-ip")]
         no_ip: bool,
 
@@ -299,7 +299,7 @@ pub enum ScopesAction {
         /// The catalog's answer for one scope type, including `known: false`
         /// for a scope it does not list: the catalog is advisory and
         /// rbxapikey.toml forwards any string. Field names are documented in
-        /// docs/apikey.md.
+        /// <https://github.com/rbx-forge/rbx-apikey/blob/main/docs/apikey.md>.
         #[arg(long)]
         json: bool,
     },
