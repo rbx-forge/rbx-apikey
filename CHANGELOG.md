@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-08
+
 First release as a standalone tool.
 
 - Declares Open Cloud API keys in `rbxapikey.toml` and creates, updates, rotates, resolves and deletes them from it.
