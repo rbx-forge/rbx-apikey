@@ -86,32 +86,11 @@ pub fn write(resolved: &Resolved, secret: &str, lock_entry: &mut LockEntry) -> R
                         .with_context(|| format!("failed to create dir {}", parent.display()))?;
                 }
             }
-            std::fs::write(path, secret)
-                .with_context(|| format!("failed to write {}", path.display()))?;
-            restrict_permissions(path);
+            rbx_core::lockfile::write_private(path, secret)?;
             lock_entry.secret = None;
         }
     }
     Ok(())
-}
-
-/// Restrict a freshly-written secret file to owner-only access.
-///
-/// On Unix/macOS this sets mode `0o600`. On Windows we rely on the default
-/// NTFS ACL inheritance of the user profile directory (other standard users
-/// cannot read another user's profile files); applying a custom ACL here would
-/// require elevated, error-prone code, so we intentionally leave it as-is.
-fn restrict_permissions(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // Best-effort: a failure here doesn't make the write itself invalid.
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
 }
 
 #[derive(Debug, Default)]

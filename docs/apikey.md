@@ -273,6 +273,8 @@ operations = ["read", "write"]
 
 By default, secrets are stored in `rbxapikey.lock.toml`, which **you** have to gitignore: nothing in this tool writes into your `.gitignore`. `rbx-apikey create` checks before it creates anything and refuses if git is not ignoring that file, naming the line to add.
 
+Both the lockfile and a custom secret file are written readable by your account only. On Linux and macOS that is mode `0600`, set when the file is created and tightened if the file already existed. On Windows `rbx-apikey` removes the inherited access and grants your user alone, through `icacls`, before the secret is written. If `icacls` fails, a warning names the file and the write still goes through: check who can read it. This matters most for a repository on a drive other than your profile folder, which usually inherits access for every authenticated user.
+
 ### Custom file backend
 
 ```toml
