@@ -60,7 +60,7 @@ pub struct DoctorCli {
     /// Off by default, and the only thing in this tool that talks to anyone but
     /// Roblox: your public IP is not readable from behind NAT, so learning it
     /// means one request to an echo service, which therefore sees your address.
-    /// The service is named in the output and in `docs/doctor.md`. A stale
+    /// The service is named in the output and in the documentation. A stale
     /// allowlist entry is refused as an opaque 401 that looks exactly like a
     /// wrong key, which is what this turns into a diagnosis.
     #[arg(long = "check-ip")]

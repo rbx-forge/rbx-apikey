@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The help of `doctor --check-ip` pointed at `docs/doctor.md`, a path that does not exist beside an installed binary.
+
 ## [0.1.0] - 2026-11-08
 
 First release as a standalone tool.
