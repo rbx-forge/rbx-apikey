@@ -6,8 +6,11 @@ Declare Roblox Open Cloud API keys in a file, and keep Roblox in step with it.
 
 ## Install
 
+With [mise](https://mise.jdx.dev) or [Rokit](https://github.com/rojo-rbx/rokit), either of which pins the latest release in your project's config:
+
 ```bash
-rokit add rbx-forge/rbx-apikey
+mise use --pin github:rbx-forge/rbx-apikey
+rokit add rbx-forge/rbx-apikey   # or, with Rokit
 ```
 
 Or take a binary for your platform from the [releases page](https://github.com/rbx-forge/rbx-apikey/releases), which ships a `SHA256SUMS` alongside the archives, or build from source:
