@@ -1,0 +1,243 @@
+name: Scope catalog refresh
+
+# Keeps the scope catalog compiled into the binary in step with Roblox.
+#
+# Two documents feed it, and either can move on its own: Roblox's
+# `openapi.json`, which says which scopes exist, and the key service's
+# `cloud-authentication/v1/scopes`, which says what a creation request may send
+# for each one and is the authority where the two disagree.
+#
+# Stale is expensive in a specific way. The service does not refuse a scope
+# carrying a target it does not accept, it throws, and `create` reports
+# `500 Internal Server Error: Exception was thrown by handler` naming neither
+# the scope nor the field. This is the cheap alarm for that.
+#
+# This never pushes to main. A change arrives as a reviewable pull request.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 06:47 UTC daily. Deliberately not on the hour: scheduled jobs at :00 sit
+    # in GitHub's busiest queue and start late.
+    - cron: "47 6 * * *"
+
+# Never let two runs race: the second would branch from a tree the first has
+# already changed. `cancel-in-progress: false` because a run that is already
+# opening a pull request should be allowed to finish.
+concurrency:
+  group: scope-catalog
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM_REPO: Roblox/creator-docs
+  UPSTREAM_DOC: content/en-us/reference/cloud/openapi.json
+
+jobs:
+  refresh:
+    name: Regenerate the catalog
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve the upstream commit that last touched the document
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The document's own last-touching commit, not the repo HEAD: that is
+          # what the catalog's `source_url` will name, so it is what we pin.
+          commit=$(gh api \
+            "repos/${UPSTREAM_REPO}/commits?path=${UPSTREAM_DOC}&per_page=1" \
+            --jq '.[0]')
+          sha=$(printf '%s' "$commit" | jq -r '.sha')
+          if [ -z "$sha" ] || [ "$sha" = "null" ]; then
+            echo "Could not resolve an upstream commit for ${UPSTREAM_DOC}." >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Upstream document pinned at $sha."
+
+      - name: Check out only the document from the upstream repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ steps.upstream.outputs.sha }}
+          # Sparse checkout with cone mode OFF so the pattern is a single file
+          # path rather than a directory prefix. creator-docs is a very large
+          # repository; cloning it whole to read one file is wasteful.
+          sparse-checkout: ${{ env.UPSTREAM_DOC }}
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+          path: upstream
+          persist-credentials: false
+
+      - name: Stage the document with its provenance
+        # Outside the checkout, so nothing upstream can end up in the pull
+        # request. The `source.json` beside the document is what makes
+        # `catalog regenerate` record a permalink to that exact upstream commit
+        # instead of a local path.
+        run: |
+          set -euo pipefail
+          src="upstream/${UPSTREAM_DOC}"
+          test -s "$src" || { echo "Sparse checkout produced no document at $src" >&2; exit 1; }
+          mkdir -p "$RUNNER_TEMP/spec"
+          cp "$src" "$RUNNER_TEMP/spec/openapi.json"
+          jq -n \
+            --arg repository "$UPSTREAM_REPO" \
+            --arg commit "${{ steps.upstream.outputs.sha }}" \
+            --arg document "$UPSTREAM_DOC" \
+            '{repository: $repository, commit: $commit, document: $document}' \
+            > "$RUNNER_TEMP/spec/source.json"
+          rm -rf upstream
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+
+      - name: Regenerate the catalog
+        id: catalog
+        # The command writes `src/data/catalog.json` relative to the working
+        # directory, which is this repository's root. It prints one line per
+        # correction the key service applied; that output is the whole
+        # diagnostic, so it is kept for the pull request body.
+        run: |
+          set -euo pipefail
+          cargo run -q --locked --bin rbx-apikey -- \
+            catalog regenerate "file://$RUNNER_TEMP/spec/openapi.json" 2>&1 | tee catalog.log
+          if git diff --quiet -- src/data/catalog.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "The catalog still matches both documents; nothing to do."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git --no-pager diff --stat -- src/data/catalog.json
+          fi
+
+      # Only the `version` line moved: the generator stamps the current date
+      # on every run, so a catalog whose scopes are all unchanged still shows
+      # a one-line diff. Opening a pull request for that every morning would
+      # train everyone to ignore this workflow.
+      - name: Ignore a diff that is only the date stamp
+        id: substantive
+        if: steps.catalog.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          # Both greps are wrapped because grep exits 1 when it prints nothing,
+          # and under `pipefail` that is exactly the case this step exists to
+          # handle (only the stamp moved): it would fail the job.
+          moved=$(git diff -U0 -- src/data/catalog.json \
+            | { grep -E '^[+-][^+-]' || true; } \
+            | { grep -vE '^[+-]\s*"version":' || true; } \
+            | wc -l)
+          echo "Lines changed besides the date stamp: $moved"
+          if [ "$moved" -eq 0 ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Only the date stamp moved. Discarding."
+            git checkout -- src/data/catalog.json
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run the tests against the refreshed catalog
+        id: verify
+        if: steps.substantive.outputs.changed == 'true'
+        # Non-fatal: a failure here is the most valuable thing this run can
+        # find, so it has to reach a human through the pull request rather than
+        # die in a log nobody opens. The tests are the ones asserting that group
+        # scopes take no target and that `asset` still takes a creator one.
+        continue-on-error: true
+        run: |
+          set +e
+          cargo test --locked 2>&1 | tee verify.log
+          echo "exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Compose the pull request body
+        if: steps.substantive.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.verify.outputs.exit }}" = "0" ]; then
+            verdict="The tests **passed** against the refreshed catalog."
+            action="Read the corrections below, confirm they describe a change Roblox actually made, then merge."
+          else
+            verdict="The tests **FAILED** against the refreshed catalog."
+            action="Do not merge until a human has decided what to do. A failure here usually means an assertion pinning a specific scope's target no longer holds, which is either Roblox changing that scope or this workflow reading the wrong document."
+          fi
+          {
+            echo "## The scope catalog changed"
+            echo
+            echo "Spec: \`${UPSTREAM_REPO}\` at \`${{ steps.upstream.outputs.sha }}\`"
+            echo "Authority: \`https://apis.roblox.com/cloud-authentication/v1/scopes\`"
+            echo
+            echo "$verdict"
+            echo
+            echo "### Why this matters more than a normal dependency bump"
+            echo
+            echo "The service does not reject a scope sent with a target it does not accept."
+            echo "It throws, and \`create\` reports \`500 Internal Server Error:"
+            echo "Exception was thrown by handler\`, naming neither the scope nor the field."
+            echo "So a stale catalog does not fail loudly, it fails opaquely. $action"
+            echo
+            echo "<details><summary>What the regeneration printed</summary>"
+            echo
+            echo '```'
+            cat catalog.log
+            echo '```'
+            echo
+            echo "</details>"
+            if [ "${{ steps.verify.outputs.exit }}" != "0" ]; then
+              echo
+              echo "<details><summary>Test output</summary>"
+              echo
+              echo '```'
+              cat verify.log
+              echo '```'
+              echo
+              echo "</details>"
+            fi
+          } > pr-body.md
+
+      # A pull request opened with the default GITHUB_TOKEN starts no workflow:
+      # GitHub refuses, so a bot cannot set off an endless chain of runs. A
+      # GitHub App token is not the bot, so its PR does start CI. Optional on
+      # purpose: with no app configured this keeps working on GITHUB_TOKEN, and
+      # the PR then needs a close and reopen to run CI.
+      - name: Mint an app token, so the pull request can start CI
+        id: app-token
+        if: steps.substantive.outputs.changed == 'true' && vars.SPEC_BOT_APP_ID != ''
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.SPEC_BOT_APP_ID }}
+          private-key: ${{ secrets.SPEC_BOT_PRIVATE_KEY }}
+
+      - name: Open a pull request
+        if: steps.substantive.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.app-token.outputs.token || github.token }}
+          # The catalog only. `catalog.log` and `verify.log` are scratch files
+          # and must not be committed.
+          add-paths: |
+            src/data/catalog.json
+          branch: chore/scope-catalog
+          # Reuse the branch so a later run updates the open PR instead of
+          # opening a new one every morning.
+          delete-branch: true
+          commit-message: |
+            chore: refresh the scope catalog
+
+            Roblox's scope documents changed, so the embedded catalog no
+            longer described what a key creation request may send.
+          title: "chore: refresh the scope catalog"
+          body-path: pr-body.md
+          labels: |
+            dependencies
+            api-drift

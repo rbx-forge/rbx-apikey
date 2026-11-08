@@ -1,0 +1,19 @@
+/target
+
+# Editor/tool configs
+.idea/
+.vscode/
+.zed/
+.claude/
+
+# A real project's files dropped here for a manual test. The lockfile and the
+# secret files hold live credentials; rbxapikey.toml and rbxplace.toml name
+# universes, places and allowed addresses.
+/rbxapikey.toml
+/rbxapikey.lock.toml
+/rbxplace.toml
+/.secrets/
+
+# Scratch output of the scope catalog workflow.
+/catalog.log
+/verify.log

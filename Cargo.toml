@@ -1,0 +1,82 @@
+[package]
+name = "rbx-apikey"
+version = "0.1.0"
+edition = "2021"
+# Set by a dependency, not by this crate's own sources: `image`, which arrives
+# through `rbx-core`, declares 1.88. It moves when a dependency moves it; the
+# `msrv` CI job is what stops it moving silently.
+rust-version = "1.88"
+license = "MPL-2.0"
+description = "Declare Roblox Open Cloud API keys in a file and keep Roblox in step with it"
+repository = "https://github.com/rbx-forge/rbx-apikey"
+homepage = "https://github.com/rbx-forge/rbx-apikey"
+authors = ["rbx-forge"]
+keywords = ["roblox", "open-cloud", "api-key", "cli"]
+categories = ["command-line-utilities", "game-development"]
+readme = "README.md"
+# crates.io refuses a crate with a git dependency, and this one has one. The
+# binary ships through GitHub releases.
+publish = false
+
+[lib]
+name = "rbx_apikey"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rbx-apikey"
+path = "src/main.rs"
+
+# Writes schemas/rbxapikey.schema.json from the serde models. Needs the
+# `schema` feature, so `schemars` never reaches the shipped binary:
+#   cargo run -p rbx-apikey --features schema --bin rbx-apikey-schema
+#   cargo run -p rbx-apikey --features schema --bin rbx-apikey-schema -- --check
+[[bin]]
+name = "rbx-apikey-schema"
+path = "src/bin/schema.rs"
+required-features = ["schema"]
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+colored = "2"
+dialoguer = "0.11"
+# Same major as `rbx-core`, so the `reqwest::Client` it builds is the type this
+# crate sends requests with. TLS is whatever `rbx-core` selects, which is
+# rustls over the OS trust store: no OpenSSL to find at launch.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+schemars = { version = "0.8", default-features = false, features = ["derive"], optional = true }
+# The HTTP client with its retry policy, the Roblox session check, the Studio
+# cookie lookup with its consent prompt, `rbxplace.toml` parsing and the
+# lockfile writer. A branch rather than a rev: Cargo.lock pins the exact
+# commit, and `cargo update -p rbx-core` is how a fix arrives.
+rbx-core = { git = "https://github.com/rbx-forge/rbx-cli", branch = "main" }
+
+[dev-dependencies]
+tempfile = "3"
+wiremock = "0.6"
+
+[features]
+# Adds `JsonSchema` to the config models, for the schema writer above. Off by
+# default so `schemars` never reaches the shipped binary.
+schema = ["dep:schemars"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[lints.rust]
+unsafe_code = "warn"
+missing_debug_implementations = "warn"
+unused_qualifications = "warn"
+
+[lints.clippy]
+todo = "warn"
+dbg_macro = "warn"
+print_stdout = "allow"   # CLI tool, println! is intentional
+print_stderr = "allow"

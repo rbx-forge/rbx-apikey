@@ -1,0 +1,313 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "rbxapikey.toml",
+  "description": "Declarative Open Cloud API keys: scopes, expiry, allowed CIDRs, and where each key's secret is written. See docs/apikey.md.",
+  "type": "object",
+  "properties": {
+    "keys": {
+      "description": "One entry per key, keyed by the short name commands refer to (`rbx-apikey create readonly`).",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/RawKey"
+      }
+    },
+    "settings": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RawSettings"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "DatastoreSpec": {
+      "description": "One entry of a key's `datastores` array: which store, in which universe, and what may be done to it.",
+      "type": "object",
+      "required": [
+        "name",
+        "operations",
+        "universe_id"
+      ],
+      "properties": {
+        "name": {
+          "description": "Data store name, as created in Studio or through the API.",
+          "type": "string"
+        },
+        "operations": {
+          "description": "Operations allowed on it: `read`, `create`, `update`, `list`, `delete`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "universe_id": {
+          "description": "Universe the data store belongs to.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "RawEnvs": {
+      "description": "What a key's `envs` field may hold: one list, or one list per named group.\n\nTOML tells the two apart on its own (an array is not a table) so fan-out needs no flag of its own to switch on. The array form keeps the meaning it has always had, which matters: a read-only observability key that legitimately spans dev, staging and prod is still one key, and turning every declaration into per-env keys would have broken it.\n\nTwo alternatives were rejected. A `per_env = true` flag cannot express the split people actually run (dev and staging sharing one key while prod stays alone) since it only produces singletons. A positional list of lists gives the groups no stable identity, so the generated key names, secret files and lockfile entries would be keyed by position and would all move the day somebody reorders the list or adds an env.",
+      "anyOf": [
+        {
+          "description": "`envs = [\"dev\", \"prod\"]`: one key, targeting every env listed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "A table of named groups, written as `keys.<name>.envs` with one array per group, producing one key per group: a `ci` group of dev and staging and a `prod` group of prod give the keys `deploy_ci` and `deploy_prod`, neither of which can reach the other's universes.\n\nGroup names are identity, not decoration: they name the generated key, its Roblox display name and its secret file. Renaming one is therefore renaming a key, which the lockfile reports as an orphan rather than quietly retargeting the live key.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "RawKey": {
+      "description": "One `[keys.<name>]` table: a single API key's declaration.",
+      "type": "object",
+      "properties": {
+        "allowed_cidrs": {
+          "description": "IP allowlist for this key, overriding `default_allowed_cidrs`.",
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "datastores": {
+          "description": "Data stores this key may reach, when the scope needs naming a store rather than a whole universe.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/DatastoreSpec"
+          }
+        },
+        "description": {
+          "description": "Free text shown in the Creator Hub. Worth spending: it is the only thing that explains a key to whoever finds it in six months.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "description": "Whether the key is created enabled, overriding `default_enabled`.",
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "envs": {
+          "description": "Env names this key targets, overriding `default_envs`. Written as an array for one key spanning them all, or as a table of named groups for one key per group: see the two forms above.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RawEnvs"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expiration_days": {
+          "description": "Lifetime in days, for a key that should outlive a task and no longer.",
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "expiration_months": {
+          "description": "Lifetime in months, overriding `default_expiration_months`.",
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "expires_at": {
+          "description": "Explicit expiry as an ISO 8601 timestamp, when neither month nor day counts express the deadline.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "group_ids": {
+          "description": "Group ids this key acts on behalf of, for scopes that take a group target rather than a universe.",
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          }
+        },
+        "name": {
+          "description": "Display name on Roblox, overriding the derived one. Roblox moderation rejects names containing \"rbx\" or \"roblox\" next to an API or commerce term.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "place_ids": {
+          "description": "Place ids this key targets, each standing for its universe, which is looked up once and cached in the lockfile. Combines with `envs` and `universe_ids`.",
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          }
+        },
+        "readonly": {
+          "description": "Refuse this key if it asks for a write operation.",
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "scopes": {
+          "description": "Open Cloud scopes, each written `scope-type:op1,op2` (`universe.user-restriction:read,write`). Roblox binds these at creation, so they cannot be widened afterwards.",
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "secret_file": {
+          "description": "Where this key's secret is written, overriding `default_secret_file`.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "universe_ids": {
+          "description": "Universe ids this key targets directly, with no `rbxplace.toml` needed. Combines with `envs` and `place_ids`.",
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          }
+        },
+        "user_ids": {
+          "description": "User ids this key acts on behalf of, for user-targeted scopes.",
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          }
+        }
+      }
+    },
+    "RawSettings": {
+      "description": "The `[settings]` table: defaults every key inherits unless it overrides them.",
+      "type": "object",
+      "properties": {
+        "default_allowed_cidrs": {
+          "description": "IP ranges allowed to use a key that sets no allowlist of its own, in CIDR form (`203.0.113.7/32`). Must match the public IP of the machine making the calls; a stale entry fails as an opaque 401.",
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "default_enabled": {
+          "description": "Whether keys are created enabled. Defaults to true.",
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "default_envs": {
+          "description": "Env names from `rbxplace.toml` that a key targets when it names none itself. Each env contributes its universe id to the key's scopes.",
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "default_expiration_months": {
+          "description": "Lifetime in months for a key that sets no expiry of its own. Roblox caps a key at 12 months.",
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "default_secret_file": {
+          "description": "Template path for a key's secret file, where `{name}` is replaced with the key's TOML name and `{env_group}` with its env group, if it has one. Without it, secrets fall back to the lockfile backend.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name_prefix": {
+          "description": "Prepended verbatim to every key's display name on Roblox, separator included (`mygame_`). Lets several projects share one Creator Hub account without colliding names.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "readonly": {
+          "description": "Refuse any key in this file that asks for a write operation.",
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

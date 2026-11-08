@@ -1,0 +1,334 @@
+{
+  "version": "2026-11-05",
+  "source_url": "https://github.com/Roblox/creator-docs/blob/b032c6ba6763d57ace62e0a04b3b48650f50fbab/content/en-us/reference/cloud/openapi.json",
+  "authority_url": "https://apis.roblox.com/cloud-authentication/v1/scopes",
+  "scopes": {
+    "ad.billing": {
+      "operations": [
+        "read"
+      ],
+      "target_type": "none"
+    },
+    "ad.campaign": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "none"
+    },
+    "asset": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "creator",
+      "description": "Asset operations (upload, modify, delete). Derived from universe owner if not explicit."
+    },
+    "asset-permissions": {
+      "operations": [
+        "write"
+      ],
+      "target_type": "none"
+    },
+    "creator-store-product": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "none"
+    },
+    "creator-store-save": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "none"
+    },
+    "developer-product": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "extended-services": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "game-pass": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "group": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "none",
+      "description": "Group join requests, memberships, role assignments."
+    },
+    "group-forum": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "none",
+      "description": "Group forum categories, posts, comments."
+    },
+    "legacy-asset": {
+      "operations": [
+        "manage"
+      ],
+      "target_type": "none"
+    },
+    "legacy-badge": {
+      "operations": [
+        "manage"
+      ],
+      "target_type": "none"
+    },
+    "legacy-developer-product": {
+      "operations": [
+        "manage"
+      ],
+      "target_type": "none"
+    },
+    "legacy-game-pass": {
+      "operations": [
+        "manage"
+      ],
+      "target_type": "none"
+    },
+    "legacy-group": {
+      "operations": [
+        "manage"
+      ],
+      "target_type": "none"
+    },
+    "legacy-team-collaboration": {
+      "operations": [
+        "manage"
+      ],
+      "target_type": "none"
+    },
+    "legacy-universe": {
+      "operations": [
+        "manage"
+      ],
+      "target_type": "none"
+    },
+    "legacy-universe.badge": {
+      "operations": [
+        "manage-and-spend-robux",
+        "write"
+      ],
+      "target_type": "none"
+    },
+    "legacy-universe.following": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "none"
+    },
+    "legacy-user": {
+      "operations": [
+        "manage"
+      ],
+      "target_type": "none"
+    },
+    "memory-store": {
+      "operations": [
+        "flush",
+        "get"
+      ],
+      "target_type": "universe"
+    },
+    "memory-store.queue": {
+      "operations": [
+        "add",
+        "dequeue",
+        "discard"
+      ],
+      "target_type": "universe"
+    },
+    "memory-store.sorted-map": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "studio-evaluations": {
+      "operations": [
+        "create"
+      ],
+      "target_type": "none"
+    },
+    "thumbnail": {
+      "operations": [
+        "read"
+      ],
+      "target_type": "none"
+    },
+    "universe": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "universe-datastores.control": {
+      "operations": [
+        "create",
+        "delete",
+        "list",
+        "snapshot"
+      ],
+      "target_type": "universe"
+    },
+    "universe-datastores.objects": {
+      "operations": [
+        "create",
+        "delete",
+        "list",
+        "read",
+        "update"
+      ],
+      "target_type": "universe-datastore"
+    },
+    "universe-datastores.versions": {
+      "operations": [
+        "list",
+        "read"
+      ],
+      "target_type": "universe-datastore"
+    },
+    "universe-messaging-service": {
+      "operations": [
+        "publish"
+      ],
+      "target_type": "universe"
+    },
+    "universe-places": {
+      "operations": [
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "universe.analytics": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "universe.analytics.alert": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "universe.analytics.dashboard": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "universe.event": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "universe.ordered-data-store.scope.entry": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "universe.place": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "universe.place.instance": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "universe.place.luau-execution-session": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "universe.secret": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "universe.subscription-product.subscription": {
+      "operations": [
+        "read"
+      ],
+      "target_type": "none"
+    },
+    "universe.thumbnail": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "universe.user-restriction": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "user.advanced": {
+      "operations": [
+        "read"
+      ],
+      "target_type": "none"
+    },
+    "user.inventory-item": {
+      "operations": [
+        "read"
+      ],
+      "target_type": "none"
+    },
+    "user.social": {
+      "operations": [
+        "read"
+      ],
+      "target_type": "none"
+    },
+    "user.user-notification": {
+      "operations": [
+        "write"
+      ],
+      "target_type": "universe",
+      "description": "Send user notifications."
+    }
+  }
+}
