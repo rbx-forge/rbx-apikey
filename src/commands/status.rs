@@ -131,15 +131,17 @@ pub async fn run(global: &GlobalFlags, remote_check: bool, format: OutputFormat)
             ),
             (None, None) => continue, // shouldn't happen since name_set unions them.
             (Some(entry), Some(_)) => {
-                let resolved = secret_store::backend_for(&cfg, key_cfg, name);
+                let resolved = secret_store::stored_backend(&cfg, key_cfg, name, Some(entry));
                 let secret = secret_store::read(&resolved, Some(entry));
+                // Printed with --stdout: held elsewhere on purpose, not missing.
+                let held_elsewhere = resolved.backend == secret_store::Backend::External;
 
                 if !entry.is_enabled {
                     (
                         Status::Disabled,
                         format!("key is disabled in Roblox - `rbx-apikey update {}`", name),
                     )
-                } else if secret.is_none() {
+                } else if secret.is_none() && !held_elsewhere {
                     let detail = match resolved.backend {
                         secret_store::Backend::File => {
                             format!("file {} not found or empty", resolved.target)
@@ -148,6 +150,8 @@ pub async fn run(global: &GlobalFlags, remote_check: bool, format: OutputFormat)
                             "secret missing in lockfile - `rbx-apikey regenerate {}`",
                             name
                         ),
+                        // Excluded by `held_elsewhere` above; spelled out for the match.
+                        secret_store::Backend::External => resolved.target.clone(),
                     };
                     (Status::SecretMissing, detail)
                 } else if days.map(|d| d < 0).unwrap_or(false) {

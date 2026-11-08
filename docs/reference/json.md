@@ -32,7 +32,7 @@ Optional fields are absent rather than `null`. `schema_version` is `1`.
 }
 ```
 
-`declared` without `created` is pending; `created` without `declared` is an orphan. Lockfile fields are absent for a key never created. `days_until_expiry` is negative once past, absent without expiry. Not combinable with `--expiry-only`.
+`secret_backend` is `lockfile`, `file`, or `external` for a key printed with `--stdout` (then `secret_present` is `false`: the secret is not held here). `declared` without `created` is pending; `created` without `declared` is an orphan. Lockfile fields are absent for a key never created. `days_until_expiry` is negative once past, absent without expiry. Not combinable with `--expiry-only`.
 
 ## rbx-apikey list --remote --json
 

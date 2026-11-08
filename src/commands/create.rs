@@ -37,6 +37,7 @@ fn confirm_creator(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     global: &GlobalFlags,
     name: Option<&str>,
@@ -45,15 +46,29 @@ pub async fn run(
     force: bool,
     skip_verify: bool,
     yes: bool,
+    stdout: bool,
 ) -> Result<()> {
     require_no_collision(all, name)?;
+    if stdout {
+        // One stream, one secret: the picker could choose several.
+        if name.is_none() {
+            bail!(
+                "--stdout prints one secret: name the key, as in \
+                 `rbx-apikey create deploy --stdout`"
+            );
+        }
+        crate::out::reserve_stdout();
+    }
 
     let cfg = config::load()?;
     // Before anything is created on Roblox: a secret about to be written into
     // a file git will happily commit is the one failure this tool must not
     // ship. Checked here rather than at write time, because refusing after
-    // creation leaves a live key whose secret was never stored.
-    refuse_if_the_secret_would_be_committed(&cfg)?;
+    // creation leaves a live key whose secret was never stored. Under
+    // `--stdout` nothing secret reaches the disk, so there is nothing to guard.
+    if !stdout {
+        refuse_if_the_secret_would_be_committed(&cfg)?;
+    }
     let mut lk = lock::load()?;
     let places = super::load_places(global)?;
     let client = make_client(global);
@@ -69,10 +84,10 @@ pub async fn run(
         candidates.sort();
 
         if candidates.is_empty() {
-            println!("All keys in rbxapikey.toml already have entries in the lockfile.");
-            println!("  → rotate secret:   rbx-apikey regenerate <key>");
-            println!("  → update config:   rbx-apikey update <key>");
-            println!("  → start fresh:     rbx-apikey create <key> --force");
+            say!("All keys in rbxapikey.toml already have entries in the lockfile.");
+            say!("  → rotate secret:   rbx-apikey regenerate <key>");
+            say!("  → update config:   rbx-apikey update <key>");
+            say!("  → start fresh:     rbx-apikey create <key> --force");
             return Ok(());
         }
 
@@ -81,7 +96,7 @@ pub async fn run(
             .items(&candidates)
             .interact()?;
         if selection.is_empty() {
-            println!("Nothing selected.");
+            say!("Nothing selected.");
             return Ok(());
         }
         let chosen: Vec<String> = selection
@@ -90,7 +105,7 @@ pub async fn run(
             .collect();
 
         if no_ip {
-            println!("{}", "--no-ip: keys accept calls from any IP".yellow());
+            say!("{}", "--no-ip: keys accept calls from any IP".yellow());
         }
 
         let account = client.authenticated_account().await?;
@@ -108,6 +123,7 @@ pub async fn run(
                 no_ip,
                 false,
                 skip_verify,
+                false,
             )
             .await?;
             lock::save(&lk)?;
@@ -116,7 +132,7 @@ pub async fn run(
     }
 
     if no_ip {
-        println!("{}", "--no-ip: key accepts calls from any IP".yellow());
+        say!("{}", "--no-ip: key accepts calls from any IP".yellow());
     }
 
     let account = client.authenticated_account().await?;
@@ -134,7 +150,7 @@ pub async fn run(
         if names.is_empty() {
             bail!("no keys in {}", config::FILE);
         }
-        println!(
+        say!(
             "Creating keys for {} entries: {}",
             names.len(),
             names.join(", ")
@@ -150,6 +166,7 @@ pub async fn run(
                 no_ip,
                 force,
                 skip_verify,
+                false,
             )
             .await?;
             lock::save(&lk)?;
@@ -166,6 +183,7 @@ pub async fn run(
             no_ip,
             force,
             skip_verify,
+            stdout,
         )
         .await?;
         lock::save(&lk)?;
@@ -185,16 +203,17 @@ async fn create_one(
     no_ip: bool,
     force: bool,
     skip_verify: bool,
+    stdout: bool,
 ) -> Result<()> {
     let key_cfg = match config::get(cfg, name) {
         Some(k) => k,
         None => {
-            println!("{}", super::missing_key_note(cfg, name).yellow());
+            say!("{}", super::missing_key_note(cfg, name).yellow());
             return Ok(());
         }
     };
     if lock::get(lk, name).is_some() && !force {
-        println!(
+        say!(
             "{}",
             format!(
                 "skipping \"{}\": already in {} (use --force to overwrite)",
@@ -217,7 +236,7 @@ async fn create_one(
 
     let build = scope_builder::build(key_cfg, &universe_ids, &universe_owners);
     for w in &build.warnings {
-        println!("{}", format!("  ⚠ {}", w).yellow());
+        say!("{}", format!("  ⚠ {}", w).yellow());
     }
 
     let cidrs = build_cidrs(cfg, key_cfg, name, no_ip)?;
@@ -233,7 +252,7 @@ async fn create_one(
         scopes: build.scopes.clone(),
     };
 
-    println!(
+    say!(
         "Creating \"{}\"... ({} scope entries)",
         name,
         build.scopes.len()
@@ -271,7 +290,11 @@ async fn create_one(
         }
     }
 
-    let resolved = secret_store::backend_for(cfg, Some(key_cfg), name);
+    let resolved = if stdout {
+        secret_store::external()
+    } else {
+        secret_store::backend_for(cfg, Some(key_cfg), name)
+    };
     let secret_file_target = if resolved.backend == secret_store::Backend::File {
         Some(resolved.target.clone())
     } else {
@@ -282,6 +305,7 @@ async fn create_one(
         cloud_auth_id: info.id.clone(),
         secret: None,
         secret_file: secret_file_target,
+        secret_external: false,
         creator_id,
         is_enabled,
         created_at: info.created_time.clone().unwrap_or_else(time_iso::iso_now),
@@ -297,18 +321,31 @@ async fn create_one(
         );
     }
 
+    if stdout {
+        // Printed as soon as it is known, before anything else can fail: Roblox
+        // will never show this secret again.
+        crate::out::emit_secret(&secret).map_err(|e| {
+            anyhow::anyhow!(
+                "\"{name}\" key created on Roblox but printing its secret failed: {e}\n  \
+                 Run `rbx-apikey regenerate {name} --stdout` for a new one. \
+                 Roblox cloud_auth_id: {}",
+                info.id
+            )
+        })?;
+    }
+
     // Merge the freshly-synced envs back so other keys' envs persist.
     for (env_name, lock_env) in synced {
         lk.envs.insert(env_name, lock_env);
     }
     lock::set(lk, name, entry);
 
-    let where_str = if resolved.backend == secret_store::Backend::File {
-        format!(" (secret → {})", resolved.target)
-    } else {
-        String::new()
+    let where_str = match resolved.backend {
+        secret_store::Backend::File => format!(" (secret → {})", resolved.target),
+        secret_store::Backend::External => " (secret printed on stdout)".to_string(),
+        secret_store::Backend::Lockfile => String::new(),
     };
-    println!(
+    say!(
         "{}",
         format!(
             "✓ Created \"{}\" (id={}, expires={}){}",
@@ -388,7 +425,7 @@ fn permissions(scopes: &[ScopeDef]) -> BTreeSet<(String, String, String)> {
 async fn verify_against_introspect(client: &RbxApiKeyClient, secret: &str, sent: &[ScopeDef]) {
     let resp = match client.introspect_api_key(secret).await {
         Err(e) => {
-            println!(
+            say!(
                 "{}",
                 // `{:#}` and not `{}`: the error arrives wrapped in context,
                 // and `{}` renders only the outermost frame. That printed
@@ -404,7 +441,7 @@ async fn verify_against_introspect(client: &RbxApiKeyClient, secret: &str, sent:
 
     let stored: Vec<ScopeDef> = match crate::introspect::scopes_from_response(&resp) {
         None => {
-            println!("{}", "  (introspect returned an unexpected shape)".yellow());
+            say!("{}", "  (introspect returned an unexpected shape)".yellow());
             return;
         }
         Some(Err(why)) => {
@@ -412,7 +449,7 @@ async fn verify_against_introspect(client: &RbxApiKeyClient, secret: &str, sent:
             // not understand turns "we could not read the answer" into "the key
             // grants nothing", which is how the shape mismatch found on
             // 2026-08-16 stayed invisible.
-            println!(
+            say!(
                 "{}",
                 format!("  (introspect answered in a shape this build cannot read: {why})")
                     .yellow()
@@ -429,7 +466,7 @@ async fn verify_against_introspect(client: &RbxApiKeyClient, secret: &str, sent:
     let extra: Vec<String> = got.difference(&asked).map(spell_permission).collect();
 
     if missing.is_empty() && extra.is_empty() {
-        println!(
+        say!(
             "{}",
             format!(
                 "  ✓ Introspect verified: {} permission(s) match the request",
@@ -444,7 +481,7 @@ async fn verify_against_introspect(client: &RbxApiKeyClient, secret: &str, sent:
     // and every later failure will be a permission error on the resource
     // rather than anything naming the key.
     if !missing.is_empty() {
-        println!(
+        say!(
             "{}",
             format!("  ⚠ Roblox did not store: {}", missing.join(", ")).yellow()
         );
@@ -453,7 +490,7 @@ async fn verify_against_introspect(client: &RbxApiKeyClient, secret: &str, sent:
     // holding more than it was asked for is a scope boundary that is wider
     // than the config says.
     if !extra.is_empty() {
-        println!(
+        say!(
             "{}",
             format!("  ⚠ Roblox stored, unasked: {}", extra.join(", ")).yellow()
         );

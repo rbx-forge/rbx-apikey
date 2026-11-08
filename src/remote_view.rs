@@ -196,6 +196,7 @@ mod tests {
                     cloud_auth_id: (*id).to_string(),
                     secret: None,
                     secret_file: None,
+                    secret_external: false,
                     creator_id: 1,
                     is_enabled: true,
                     created_at: "2026-01-01T00:00:00.000Z".to_string(),

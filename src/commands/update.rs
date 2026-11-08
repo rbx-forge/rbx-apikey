@@ -37,7 +37,7 @@ pub async fn run(
         if v.is_empty() {
             bail!("no keys in {}", lock::FILE);
         }
-        println!("Updating {} keys: {}", v.len(), v.join(", "));
+        say!("Updating {} keys: {}", v.len(), v.join(", "));
         v
     } else {
         vec![name.unwrap().to_string()]
@@ -83,7 +83,7 @@ async fn update_one(
     let entry = match lock::get(lk, name).cloned() {
         Some(e) => e,
         None => {
-            println!(
+            say!(
                 "{}",
                 format!("skipping \"{}\": not in {}", name, lock::FILE).yellow()
             );
@@ -94,7 +94,7 @@ async fn update_one(
     let key_cfg = match config::get(cfg, name) {
         Some(k) => k,
         None => {
-            println!("{}", super::missing_key_note(cfg, name).yellow());
+            say!("{}", super::missing_key_note(cfg, name).yellow());
             return Ok(());
         }
     };
@@ -110,7 +110,7 @@ async fn update_one(
 
     let build = scope_builder::build(key_cfg, &universe_ids, &universe_owners);
     for w in &build.warnings {
-        println!("{}", format!("  ⚠ {}", w).yellow());
+        say!("{}", format!("  ⚠ {}", w).yellow());
     }
 
     let cidrs = build_cidrs(cfg, key_cfg, name, no_ip)?;
@@ -123,7 +123,11 @@ async fn update_one(
     let new_resolved = secret_store::backend_for(cfg, Some(key_cfg), name);
     let previous_resolved = secret_store::previous_backend_from_entry(&entry, name);
     let mut entry = entry;
-    let needs_migration = secret_store::backend_differs(&previous_resolved, &new_resolved);
+    // A secret printed with --stdout is held elsewhere: there is nothing here
+    // to migrate, and the entry keeps saying where it is.
+    let held_elsewhere = previous_resolved.backend == secret_store::Backend::External;
+    let needs_migration =
+        !held_elsewhere && secret_store::backend_differs(&previous_resolved, &new_resolved);
 
     if needs_migration {
         let secret = secret_store::read(&previous_resolved, Some(&entry)).ok_or_else(|| {
@@ -144,7 +148,7 @@ async fn update_one(
                 e
             )
         })?;
-        println!(
+        say!(
             "{}",
             format!(
                 "  ↪ Secret backend changed: {}:{} → {}:{} (migrated)",
@@ -157,11 +161,12 @@ async fn update_one(
         );
     }
 
-    let secret_file_target = if new_resolved.backend == secret_store::Backend::File {
-        Some(new_resolved.target.clone())
-    } else {
-        None
-    };
+    let secret_file_target =
+        if !held_elsewhere && new_resolved.backend == secret_store::Backend::File {
+            Some(new_resolved.target.clone())
+        } else {
+            None
+        };
 
     let payload = ConfigProperties {
         name: config::resolve_remote_name(cfg, key_cfg, name),
@@ -185,7 +190,7 @@ async fn update_one(
         skip_confirm,
     )?;
 
-    println!("Updating \"{}\" (id={})...", name, entry.cloud_auth_id);
+    say!("Updating \"{}\" (id={})...", name, entry.cloud_auth_id);
     let resp = client
         .update_api_key(&entry.cloud_auth_id, &payload)
         .await
@@ -201,7 +206,7 @@ async fn update_one(
     }
     lock::set(lk, name, entry);
 
-    println!(
+    say!(
         "{}",
         format!(
             "✓ \"{}\": cidrs={}, expires={}, enabled={}",
@@ -230,10 +235,10 @@ async fn update_one(
         };
         let cleanup = secret_store::cleanup(&previous_resolved, should_delete);
         for msg in &cleanup.auto_cleaned {
-            println!("{}", format!("  ✓ {}", msg).green());
+            say!("{}", format!("  ✓ {}", msg).green());
         }
         for msg in &cleanup.manual_action_needed {
-            println!("{}", format!("  ⚠ {}", msg).yellow());
+            say!("{}", format!("  ⚠ {}", msg).yellow());
         }
     }
 

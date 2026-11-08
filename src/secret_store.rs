@@ -12,6 +12,9 @@ use crate::lock::LockEntry;
 pub enum Backend {
     Lockfile,
     File,
+    /// Printed with `--stdout` and stored nowhere here: the user keeps it,
+    /// in a vault or wherever the pipe went.
+    External,
 }
 
 impl Backend {
@@ -19,8 +22,35 @@ impl Backend {
         match self {
             Backend::Lockfile => "lockfile",
             Backend::File => "file",
+            Backend::External => "external",
         }
     }
+}
+
+/// The backend for a secret printed with `--stdout`.
+pub fn external() -> Resolved {
+    Resolved {
+        backend: Backend::External,
+        target: "outside rbx-apikey (printed with --stdout)".to_string(),
+    }
+}
+
+/// Where this key's secret actually is: outside the tool if its lock entry
+/// says so, otherwise where the config puts it.
+///
+/// Every reader of a secret goes through this rather than `backend_for`,
+/// because the config cannot know that a past `--stdout` sent the secret
+/// elsewhere: only the lock entry records it.
+pub fn stored_backend(
+    cfg: &Config,
+    key_cfg: Option<&KeyConfig>,
+    tool_name: &str,
+    lock_entry: Option<&LockEntry>,
+) -> Resolved {
+    if lock_entry.is_some_and(|e| e.secret_external) {
+        return external();
+    }
+    backend_for(cfg, key_cfg, tool_name)
 }
 
 #[derive(Debug, Clone)]
@@ -70,11 +100,20 @@ pub fn read(resolved: &Resolved, lock_entry: Option<&LockEntry>) -> Option<Strin
                 Some(trimmed)
             }
         }
+        Backend::External => None,
     }
 }
 
+/// Store the secret where `resolved` says, and record in the lock entry where
+/// that is. `External` stores nothing: the caller prints the secret.
 pub fn write(resolved: &Resolved, secret: &str, lock_entry: &mut LockEntry) -> Result<()> {
+    lock_entry.secret_external = false;
     match resolved.backend {
+        Backend::External => {
+            lock_entry.secret = None;
+            lock_entry.secret_file = None;
+            lock_entry.secret_external = true;
+        }
         Backend::Lockfile => {
             lock_entry.secret = Some(secret.to_string());
         }
@@ -103,6 +142,9 @@ pub struct CleanupResult {
 /// lock entry instead of the live config: used by `update` to detect when the user changed
 /// `secret_file` in `rbxapikey.toml` and we need to migrate the secret.
 pub fn previous_backend_from_entry(entry: &LockEntry, tool_name: &str) -> Resolved {
+    if entry.secret_external {
+        return external();
+    }
     if let Some(path) = &entry.secret_file {
         if !path.is_empty() {
             return Resolved {
@@ -235,6 +277,7 @@ mod tests {
             cloud_auth_id: "id".into(),
             secret: secret.map(|s| s.to_string()),
             secret_file: secret_file.map(|s| s.to_string()),
+            secret_external: false,
             creator_id: 1,
             is_enabled: true,
             created_at: "now".into(),
@@ -328,6 +371,58 @@ mod tests {
             target: "/tmp/x".into(),
         };
         assert!(!backend_differs(&a, &b));
+    }
+
+    /// `--stdout`: nothing is stored, and the entry says so, so the key is
+    /// not reported as missing its secret afterwards.
+    #[test]
+    fn an_external_write_stores_nothing_and_marks_the_entry() {
+        let mut entry = entry_with(Some("old"), Some("/tmp/old.env"));
+        write(&external(), "S3CR3T", &mut entry).unwrap();
+        assert!(entry.secret.is_none());
+        assert!(entry.secret_file.is_none());
+        assert!(entry.secret_external);
+        assert_eq!(read(&external(), Some(&entry)), None);
+    }
+
+    /// The config cannot know a past `--stdout` sent the secret elsewhere, so
+    /// readers must take the lock entry's word over the config's.
+    #[test]
+    fn the_stored_backend_follows_the_entry_over_the_config() {
+        let k = key_cfg_with_secret_file(Some("/tmp/x.key"));
+        let mut entry = entry_with(None, None);
+        entry.secret_external = true;
+        let r = stored_backend(&empty_cfg(), Some(&k), "foo", Some(&entry));
+        assert_eq!(r.backend, Backend::External);
+
+        entry.secret_external = false;
+        let r = stored_backend(&empty_cfg(), Some(&k), "foo", Some(&entry));
+        assert_eq!(r.backend, Backend::File);
+    }
+
+    /// A later rotation without `--stdout` stores the secret again, so the
+    /// mark has to go.
+    #[test]
+    fn storing_a_secret_again_clears_the_external_mark() {
+        let mut entry = entry_with(None, None);
+        entry.secret_external = true;
+        let lockfile = Resolved {
+            backend: Backend::Lockfile,
+            target: "foo".into(),
+        };
+        write(&lockfile, "NEW", &mut entry).unwrap();
+        assert!(!entry.secret_external);
+        assert_eq!(entry.secret.as_deref(), Some("NEW"));
+    }
+
+    #[test]
+    fn previous_backend_is_external_when_the_entry_says_so() {
+        let mut e = entry_with(None, Some("/tmp/x"));
+        e.secret_external = true;
+        assert_eq!(
+            previous_backend_from_entry(&e, "foo").backend,
+            Backend::External
+        );
     }
 
     #[test]

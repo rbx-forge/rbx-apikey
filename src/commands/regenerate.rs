@@ -16,10 +16,14 @@ pub async fn run(
     all: bool,
     skip_confirm: bool,
     clean_files: bool,
+    stdout: bool,
 ) -> Result<()> {
     require_no_collision(all, name)?;
     if !all && name.is_none() {
         bail!("usage: rbx-apikey regenerate <key>|--all [--yes]");
+    }
+    if stdout {
+        crate::out::reserve_stdout();
     }
 
     let cfg = config::load()?;
@@ -36,8 +40,8 @@ pub async fn run(
             bail!("no keys in {}", lock::FILE);
         }
 
-        println!("About to rotate {} secrets: {}", v.len(), v.join(", "));
-        println!(
+        say!("About to rotate {} secrets: {}", v.len(), v.join(", "));
+        say!(
             "{}",
             "This invalidates ALL current secrets at once.".yellow()
         );
@@ -47,7 +51,7 @@ pub async fn run(
                 .default(false)
                 .interact()?;
             if !ok {
-                println!("{}", "Aborted.".yellow());
+                say!("{}", "Aborted.".yellow());
                 return Ok(());
             }
         }
@@ -83,7 +87,7 @@ pub async fn run(
 
     let mut outcomes = Vec::with_capacity(names.len());
     for n in &names {
-        outcomes.push(regenerate_one(&cfg, &mut lk, &client, n, clean_files).await);
+        outcomes.push(regenerate_one(&cfg, &mut lk, &client, n, clean_files, stdout).await);
         lock::save(&lk)?;
     }
 
@@ -105,7 +109,7 @@ pub async fn run(
         } else {
             format!("Old secrets for the {invalidated} key(s) rotated above")
         };
-        println!("{} invalid as of {}.", subject, time_iso::iso_now());
+        say!("{} invalid as of {}.", subject, time_iso::iso_now());
     }
 
     // Non-zero on any failure, for the same reason. `--all` deliberately walks
@@ -160,11 +164,12 @@ async fn regenerate_one(
     client: &crate::api::RbxApiKeyClient,
     name: &str,
     clean_files: bool,
+    stdout: bool,
 ) -> Rotation {
     let entry = match lock::get(lk, name).cloned() {
         Some(e) => e,
         None => {
-            println!(
+            say!(
                 "{}",
                 format!("skipping \"{}\": not in {}", name, lock::FILE).yellow()
             );
@@ -172,11 +177,11 @@ async fn regenerate_one(
         }
     };
 
-    println!("Regenerating \"{}\" (id={})...", name, entry.cloud_auth_id);
+    say!("Regenerating \"{}\" (id={})...", name, entry.cloud_auth_id);
     let resp = match client.regenerate_secret(&entry.cloud_auth_id).await {
         Ok(r) => r,
         Err(e) => {
-            println!(
+            say!(
                 "{}",
                 format!("\"{}\": regenerate failed: {}", name, e).yellow()
             );
@@ -191,12 +196,32 @@ async fn regenerate_one(
     // After a successful rotate, the OLD location holds garbage; we offer to clean it up
     // when `secret_file` was changed in rbxapikey.toml between writes.
     let previous_resolved = secret_store::previous_backend_from_entry(&entry, name);
-    let new_resolved = secret_store::backend_for(cfg, key_cfg, name);
+    let new_resolved = if stdout {
+        secret_store::external()
+    } else {
+        secret_store::backend_for(cfg, key_cfg, name)
+    };
     let backend_changed = secret_store::backend_differs(&previous_resolved, &new_resolved);
+
+    if stdout {
+        // Printed before anything else can fail: the old secret is already
+        // dead, and Roblox will never show this one again.
+        if let Err(e) = crate::out::emit_secret(&new_secret) {
+            say!(
+                "{}",
+                format!(
+                    "  ✗ Roblox rotated the secret but printing it failed: {e}. \
+                     Run `rbx-apikey regenerate {name} --stdout` again."
+                )
+                .red()
+            );
+            return Rotation::Unsaved;
+        }
+    }
 
     let mut entry = entry;
     if let Err(e) = secret_store::write(&new_resolved, &new_secret, &mut entry) {
-        println!(
+        say!(
             "{}",
             format!(
                 "  ✗ Roblox rotated the secret but writing it locally failed: {}",
@@ -204,7 +229,7 @@ async fn regenerate_one(
             )
             .red()
         );
-        println!(
+        say!(
             "{}",
             format!("  Secret (save this manually): {}", new_secret).yellow()
         );
@@ -221,7 +246,7 @@ async fn regenerate_one(
     lock::set(lk, name, entry);
 
     if backend_changed {
-        println!(
+        say!(
             "{}",
             format!(
                 "  ↪ Secret backend changed: {}:{} → {}:{} (new secret written at new location)",
@@ -248,15 +273,15 @@ async fn regenerate_one(
             };
             let cleanup = secret_store::cleanup(&previous_resolved, should_delete);
             for msg in &cleanup.auto_cleaned {
-                println!("{}", format!("  ✓ {}", msg).green());
+                say!("{}", format!("  ✓ {}", msg).green());
             }
             for msg in &cleanup.manual_action_needed {
-                println!("{}", format!("  ⚠ {}", msg).yellow());
+                say!("{}", format!("  ⚠ {}", msg).yellow());
             }
         }
     }
 
-    println!("{}", format!("✓ \"{}\": secret rotated", name).green());
+    say!("{}", format!("✓ \"{}\": secret rotated", name).green());
     Rotation::Stored
 }
 

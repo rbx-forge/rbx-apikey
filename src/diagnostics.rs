@@ -63,10 +63,11 @@ pub fn declared_keys() -> Result<Vec<DeclaredKey>> {
         .map(|name| {
             let key_cfg = config::get(&cfg, name);
             let entry = lock::get(&lk, name);
-            let resolved = secret_store::backend_for(&cfg, key_cfg, name);
+            let resolved = secret_store::stored_backend(&cfg, key_cfg, name, entry);
             let secret_origin = match resolved.backend {
                 secret_store::Backend::Lockfile => format!("{} ({})", lock::FILE, resolved.target),
                 secret_store::Backend::File => format!("file: {}", resolved.target),
+                secret_store::Backend::External => resolved.target.clone(),
             };
             DeclaredKey {
                 name: name.clone(),

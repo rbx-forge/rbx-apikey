@@ -60,6 +60,11 @@ pub struct LockEntry {
     pub secret: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_file: Option<String>,
+    /// The secret was printed with `--stdout` and never stored here. Without
+    /// this, a key whose secret lives in a vault would read as
+    /// `SECRET_MISSING` for the rest of its life.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub secret_external: bool,
     pub creator_id: u64,
     pub is_enabled: bool,
     pub created_at: String,
@@ -176,6 +181,7 @@ mod tests {
                 cloud_auth_id: "abc-123".into(),
                 secret: Some("S".into()),
                 secret_file: None,
+                secret_external: false,
                 creator_id: 42,
                 is_enabled: true,
                 created_at: "2026-05-01T10:00:00.000Z".into(),
@@ -205,6 +211,7 @@ mod tests {
                 cloud_auth_id: "abc".into(),
                 secret: None,
                 secret_file: Some("./secret.key".into()),
+                secret_external: false,
                 creator_id: 1,
                 is_enabled: true,
                 created_at: "now".into(),
@@ -218,6 +225,28 @@ mod tests {
             s
         );
         assert!(s.contains("secret_file"));
+    }
+
+    /// The mark is written only when set, so every existing lockfile reads
+    /// and writes back unchanged.
+    #[test]
+    fn the_external_mark_is_written_only_when_set() {
+        let mut entry = LockEntry {
+            cloud_auth_id: "abc".into(),
+            secret: None,
+            secret_file: None,
+            secret_external: false,
+            creator_id: 1,
+            is_enabled: true,
+            created_at: "now".into(),
+            expires_at: None,
+        };
+        assert!(!toml::to_string(&entry).unwrap().contains("secret_external"));
+        entry.secret_external = true;
+        let s = toml::to_string(&entry).unwrap();
+        assert!(s.contains("secret_external = true"), "{s}");
+        let back: LockEntry = toml::from_str(&s).unwrap();
+        assert!(back.secret_external);
     }
 
     #[test]

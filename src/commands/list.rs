@@ -71,7 +71,7 @@ pub fn run(expiry_only: bool, sort: Option<&str>, format: OutputFormat) -> Resul
             document.push(match lock::get(&lk, name) {
                 None => KeyEntry::pending(name),
                 Some(entry) => {
-                    let resolved = secret_store::backend_for(&cfg, key_cfg, name);
+                    let resolved = secret_store::stored_backend(&cfg, key_cfg, name, Some(entry));
                     KeyEntry::created(
                         name,
                         key_cfg.is_some(),
@@ -142,9 +142,11 @@ pub fn run(expiry_only: bool, sort: Option<&str>, format: OutputFormat) -> Resul
             let orphan_tag = if key_cfg.is_none() { " ← orphan" } else { "" };
             println!("  {}  {}{}", name, expiry_str, orphan_tag);
         } else {
-            let resolved = secret_store::backend_for(&cfg, key_cfg, name);
+            let resolved = secret_store::stored_backend(&cfg, key_cfg, name, Some(entry));
             let secret = secret_store::read(&resolved, Some(entry));
-            let secret_status: String = if secret.is_some() {
+            let secret_status: String = if resolved.backend == secret_store::Backend::External {
+                "held elsewhere (printed with --stdout)".to_string()
+            } else if secret.is_some() {
                 let target = if resolved.backend == secret_store::Backend::Lockfile {
                     String::new()
                 } else {

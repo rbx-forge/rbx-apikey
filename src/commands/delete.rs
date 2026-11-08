@@ -159,7 +159,7 @@ pub(crate) async fn delete_one(
     };
 
     let key_cfg = config::get(cfg, name);
-    let resolved = secret_store::backend_for(cfg, key_cfg, name);
+    let resolved = secret_store::stored_backend(cfg, key_cfg, name, Some(&entry));
 
     let account = client.known_account().await;
     if let Some(refusal) = account
@@ -268,6 +268,7 @@ mod tests {
                 cloud_auth_id: KEY_ID.into(),
                 secret: Some("not-a-real-secret".into()),
                 secret_file: None,
+                secret_external: false,
                 creator_id: CREATOR,
                 is_enabled: true,
                 created_at: "now".into(),

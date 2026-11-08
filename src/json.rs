@@ -25,8 +25,8 @@
 //!   screen.
 //! - **`list` has no path to the secret file.** The human form prints
 //!   `set (file: .secrets/deploy.env)` because the person reading it is
-//!   standing in that directory. `secret_backend` says which of the two
-//!   backends holds it and `secret_present` says whether it is there, which is
+//!   standing in that directory. `secret_backend` says which backend
+//!   holds it and `secret_present` says whether it is there, which is
 //!   what a script needs; where on disk a credential lives is not something to
 //!   publish alongside it.
 //!
@@ -133,7 +133,8 @@ pub struct KeyEntry {
     /// module docs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret_present: Option<bool>,
-    /// `lockfile` or `file`, whichever holds the secret for this key.
+    /// `lockfile` or `file`, whichever holds the secret for this key, or
+    /// `external` when it was printed with `--stdout` and is held elsewhere.
     /// **Absent** for a key that was never created. The path is not part of
     /// the document even when the backend is `file`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -451,6 +452,7 @@ mod tests {
             // something to find if a field ever starts carrying one.
             secret: Some("RBX-S3CR3T-must-never-be-serialised".into()),
             secret_file: Some("/home/dev/.secrets/deploy.env".into()),
+            secret_external: false,
             creator_id: 1_234_567_890,
             is_enabled: true,
             created_at: "2026-01-01T00:00:00.000Z".into(),

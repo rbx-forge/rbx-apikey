@@ -6,6 +6,7 @@ First release as a standalone tool.
 
 - Declares Open Cloud API keys in `rbxapikey.toml` and creates, updates, rotates, resolves and deletes them from it.
 - `status` reconciles the file, the lockfile and what Roblox holds; `list --remote` and `prune` see the keys the account holds that this project never made.
+- `create --stdout` and `regenerate --stdout` print the secret instead of storing it, for a pipe into a vault; the lockfile marks the key as held elsewhere, so `status` does not call it missing.
 - `can-manage` says beforehand whether you can create keys for a universe.
 - `doctor` diagnoses the loaded key: provenance, session, validity, IP allowlist, scope coverage for the configs in the directory, and one authenticated read.
 - `scopes` and `catalog` inspect and refresh the embedded scope catalog, which a scheduled workflow keeps in step with Roblox.

@@ -18,4 +18,18 @@ To use a secret from a script:
 export RBX_API_KEY=$(rbx-apikey resolve deploy)
 ```
 
+## Straight to a vault
+
+`--stdout` on `create` or `regenerate` prints the secret on stdout and stores it nowhere: no secret file, nothing in the lockfile. Every other line goes to stderr, so a pipe receives the secret alone, with no trailing newline.
+
+```sh
+rbx-apikey create deploy --stdout | <your vault's store command>
+rbx-apikey regenerate deploy --stdout | <your vault's store command>
+```
+
+The lockfile records `secret_external = true` for the key, so `status` does not report it as missing, `list` shows it as held elsewhere, and `resolve` refuses it. A later `regenerate` without `--stdout` stores the secret again where the config says. Rotating with `--stdout` offers to delete an old secret file, which now holds a dead secret.
+
+!!! warning "Roblox shows a secret once"
+    If the pipe fails, the secret is lost: rotate again with `regenerate --stdout`. `--stdout` takes one key, never `--all`.
+
 `--json` output never includes a secret, a piece of one, or where it is stored.

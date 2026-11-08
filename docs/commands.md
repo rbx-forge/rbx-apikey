@@ -17,6 +17,7 @@ Create the key on Roblox and store its secret. Refuses if the secret would land 
 | `--force` | Overwrite an existing lockfile entry |
 | `--no-verify` | Skip the check that Roblox stored what was asked |
 | `--yes` | Skip the confirmation |
+| `--stdout` | Print the secret on stdout instead of storing it. One key, not with `--all`. See [Secret storage](reference/secrets.md#straight-to-a-vault) |
 
 A failed creation that Roblox reports as `500` prints the scopes it sent: a scope given a target it does not take fails that way.
 
@@ -36,7 +37,7 @@ Apply the file to existing keys: enabled, expiry, IP ranges, scopes.
 
 `rbx-apikey regenerate <key> | --all`
 
-New secret, old one invalid. `--clean-files`, `--yes`.
+New secret, old one invalid. `--clean-files`, `--yes`, and `--stdout` as for `create`.
 
 ### rbx-apikey delete
 
@@ -48,7 +49,7 @@ Delete on Roblox, then from the lockfile and the secret file. A failed delete ke
 
 `rbx-apikey resolve <key>`
 
-Print the raw secret on stdout, for a script: `export RBX_API_KEY=$(rbx-apikey resolve deploy)`.
+Print the raw secret on stdout, for a script: `export RBX_API_KEY=$(rbx-apikey resolve deploy)`. Refused for a key created or rotated with `--stdout`, whose secret is not stored here.
 
 ### rbx-apikey introspect
 
@@ -91,7 +92,7 @@ Compare the file, the lockfile and, with `--remote`, Roblox. Changes nothing.
 | `EXPIRED`, `EXPIRING_SOON` | |
 | `ORPHAN_LOCK` | In the lockfile, no longer declared |
 | `ORPHAN_REMOTE` | Gone from Roblox (`--remote` only) |
-| `SECRET_MISSING` | No stored secret |
+| `SECRET_MISSING` | No stored secret (a key printed with `--stdout` is not missing: it is held elsewhere) |
 | `DISABLED` | |
 | `CHECK_FAILED` | Roblox could not be asked |
 

@@ -15,6 +15,10 @@
 //! cookie resolution is written against. The ones a command does not read are
 //! refused by name rather than ignored: see [`refuse_targeting_flags`].
 
+// First: it defines `say!`, which the modules below use.
+#[macro_use]
+mod out;
+
 mod api;
 mod commands;
 pub mod config;
@@ -82,6 +86,11 @@ pub enum ApikeyCommands {
         /// Skip the confirmation that names the account the key is minted on.
         #[arg(short = 'y', long = "yes")]
         yes: bool,
+
+        /// Print the secret on stdout instead of storing it, for a pipe into a
+        /// vault. Everything else goes to stderr. One key only.
+        #[arg(long, conflicts_with = "all")]
+        stdout: bool,
     },
 
     /// Check whether you can create keys for an experience
@@ -232,6 +241,11 @@ pub enum ApikeyCommands {
         /// If `secret_file` changed in rbxapikey.toml, delete the old secret file without asking.
         #[arg(long = "clean-files")]
         clean_files: bool,
+
+        /// Print the new secret on stdout instead of storing it, for a pipe
+        /// into a vault. Everything else goes to stderr. One key only.
+        #[arg(long, conflicts_with = "all")]
+        stdout: bool,
     },
 
     /// Delete a key from Roblox and the local lock.
@@ -371,7 +385,20 @@ pub async fn run(cli: Cli) -> Result<()> {
             force,
             no_verify,
             yes,
-        } => commands::create::run(global, key.as_deref(), all, no_ip, force, no_verify, yes).await,
+            stdout,
+        } => {
+            commands::create::run(
+                global,
+                key.as_deref(),
+                all,
+                no_ip,
+                force,
+                no_verify,
+                yes,
+                stdout,
+            )
+            .await
+        }
 
         ApikeyCommands::CanManage => commands::permissions::run(global, &global.place_id).await,
 
@@ -431,7 +458,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             all,
             yes,
             clean_files,
-        } => commands::regenerate::run(global, key.as_deref(), all, yes, clean_files).await,
+            stdout,
+        } => commands::regenerate::run(global, key.as_deref(), all, yes, clean_files, stdout).await,
 
         ApikeyCommands::Delete {
             key,
@@ -605,5 +633,34 @@ mod json_flag_tests {
         assert!(parses(&["list", "--json"]));
         assert!(!parses(&["list", "--expiry-only", "--json"]));
         assert!(parses(&["list", "--sort", "expiry", "--json"]));
+    }
+}
+
+#[cfg(test)]
+mod stdout_flag_tests {
+    use super::*;
+
+    fn parses(args: &[&str]) -> bool {
+        let mut argv = vec!["rbx-apikey"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv).is_ok()
+    }
+
+    /// One stream carries one secret. `--all` would print several, glued
+    /// together with nothing to tell them apart, so clap refuses the pair.
+    #[test]
+    fn stdout_takes_one_key_and_never_all() {
+        assert!(parses(&["create", "deploy", "--stdout"]));
+        assert!(parses(&["regenerate", "deploy", "--stdout"]));
+        assert!(!parses(&["create", "--all", "--stdout"]));
+        assert!(!parses(&["regenerate", "--all", "--stdout"]));
+    }
+
+    /// The other writes keep their secret where the config says, or have none
+    /// to print.
+    #[test]
+    fn stdout_is_only_on_the_verbs_that_mint_a_secret() {
+        assert!(!parses(&["update", "deploy", "--stdout"]));
+        assert!(!parses(&["delete", "deploy", "--stdout"]));
     }
 }
