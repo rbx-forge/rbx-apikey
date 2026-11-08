@@ -3,7 +3,7 @@
 //!
 //! The envelope: a `schema_version` first, then
 //! named objects all the way down, optional fields omitted rather than emitted
-//! as `null`, ids as strings. Field names are documented in `docs/apikey.md`
+//! as `null`, ids as strings. Field names are documented in `docs/reference/json.md`
 //! and are the compatibility surface.
 //!
 //! ## No secret, and no piece of one

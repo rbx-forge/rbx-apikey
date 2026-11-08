@@ -25,7 +25,7 @@ use super::{explain_invalid_name_or_description, make_client, require_no_collisi
 /// A key is minted on whichever account the cookie signs in as, Studio
 /// auto-detection follows whichever account Studio happens to be signed into,
 /// and the numeric id printed after the fact is not something a person can act
-/// on. `docs/apikey.md` claimed all five write verbs stopped to ask; four did.
+/// on. The docs claimed all five write verbs stopped to ask; four did.
 fn confirm_creator(
     account: &rbx_core::session::SessionAccount,
     what: &str,

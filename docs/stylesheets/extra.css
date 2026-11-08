@@ -1,0 +1,197 @@
+/* Palette for the documentation site.
+ *
+ * These are VitePress's own default values, read off the stylesheet of a site
+ * built with it rather than eyeballed: `#3451b2` indigo on pure white, text at
+ * `#3c3c43` rather than black, and the dark side at `#1b1b1f`. Material ships
+ * a fixed set of named primaries, so `primary: custom` in mkdocs.yml hands the
+ * choice here.
+ *
+ * Every pair is measured, not assumed. On white: text 10.94:1, secondary text
+ * 5.62:1, the indigo 7.08:1, and 6.56:1 where it sits on the code background,
+ * which is the pair a palette usually misses. On `#1b1b1f`: 12.81, 5.99, 8.50
+ * and 7.95. All above the 4.5:1 that WCAG AA asks for.
+ *
+ * Two decisions worth stating, because they are the ones somebody would
+ * otherwise "fix":
+ *
+ * 1. The header is not painted with the brand. Material's default is a solid
+ *    bar of the primary colour; VitePress leaves it the page colour and spends
+ *    the brand on links and the active entry. That is most of why one reads as
+ *    a document and the other as an application chrome.
+ * 2. Inline code keeps the brand colour rather than the body colour, which is
+ *    also what VitePress does, so `--place-id` and a link are told apart
+ *    without clicking. On pages where the two sit in the same sentence
+ *    constantly, that is the difference worth paying for.
+ */
+
+/* ── Light ─────────────────────────────────────────────────────────────── */
+[data-md-color-scheme="default"] {
+  --brand: #3451b2;
+  --brand-strong: #3a5ccc;
+  --brand-soft: rgb(100 108 255 / 14%);
+
+  --md-primary-fg-color: #ffffff;
+  --md-primary-fg-color--light: #ffffff;
+  --md-primary-fg-color--dark: #f6f6f7;
+  /* What sits *on* the header. Neutral, because the header is not painted. */
+  --md-primary-bg-color: #3c3c43;
+  --md-primary-bg-color--light: #67676c;
+
+  --md-accent-fg-color: var(--brand-strong);
+
+  --md-default-bg-color: #ffffff;
+  --md-default-fg-color: #3c3c43;
+  --md-default-fg-color--light: #67676c;
+  --md-default-fg-color--lighter: #8e8e95;
+  --md-default-fg-color--lightest: #e2e2e3;
+
+  --md-typeset-a-color: var(--brand);
+  --md-code-fg-color: var(--brand);
+  --md-code-bg-color: #f6f6f7;
+
+  --md-typeset-table-color: #e2e2e3;
+  --md-footer-bg-color: #1b1b1f;
+  --md-footer-bg-color--dark: #161618;
+}
+
+/* ── Dark ──────────────────────────────────────────────────────────────── */
+[data-md-color-scheme="slate"] {
+  --brand: #a8b1ff;
+  --brand-strong: #5c73e7;
+  --brand-soft: rgb(100 108 255 / 16%);
+
+  --md-primary-fg-color: #1b1b1f;
+  --md-primary-fg-color--light: #202127;
+  --md-primary-fg-color--dark: #161618;
+  --md-primary-bg-color: #dfdfd6;
+  --md-primary-bg-color--light: #98989f;
+
+  --md-accent-fg-color: var(--brand);
+
+  --md-default-bg-color: #1b1b1f;
+  --md-default-fg-color: #dfdfd6;
+  --md-default-fg-color--light: #98989f;
+  --md-default-fg-color--lighter: #6a6a71;
+  --md-default-fg-color--lightest: #2e2e32;
+
+  --md-typeset-a-color: var(--brand);
+  --md-code-fg-color: var(--brand);
+  --md-code-bg-color: #202127;
+
+  --md-typeset-table-color: #2e2e32;
+  --md-footer-bg-color: #161618;
+  --md-footer-bg-color--dark: #131316;
+}
+
+/* ── Header and tabs ───────────────────────────────────────────────────── */
+
+/* A hairline instead of a coloured slab. Without it the header and the page
+ * are the same colour with nothing between them. */
+.md-header {
+  box-shadow: none;
+  border-bottom: 1px solid var(--md-typeset-table-color);
+}
+
+.md-header--shadow {
+  box-shadow: 0 0 0.2rem rgb(0 0 0 / 6%);
+}
+
+.md-tabs {
+  border-bottom: 1px solid var(--md-typeset-table-color);
+}
+
+.md-tabs__link {
+  opacity: 0.72;
+  font-weight: 500;
+}
+
+.md-tabs__link:hover,
+.md-tabs__link--active {
+  opacity: 1;
+  color: var(--brand);
+}
+
+.md-search__form {
+  background: var(--md-code-bg-color);
+  border: 1px solid var(--md-typeset-table-color);
+  border-radius: 8px;
+}
+
+.md-search__form:hover {
+  background: var(--md-code-bg-color);
+  border-color: var(--brand);
+}
+
+/* ── Navigation ────────────────────────────────────────────────────────── */
+
+.md-nav__link--active,
+.md-nav__link--active code {
+  color: var(--brand);
+  font-weight: 600;
+}
+
+.md-nav__item .md-nav__link:hover {
+  color: var(--brand);
+}
+
+/* ── Layout ────────────────────────────────────────────────────────────── */
+
+/* Material's default content column is sized for prose, and nearly every page
+ * here carries a table of fields, flags or scopes. At the default width a
+ * four-column table wraps its cells and stops reading as a grid, which is the
+ * whole reason it is a table. */
+.md-grid {
+  max-width: 68rem;
+}
+
+/* ── Tables ────────────────────────────────────────────────────────────── */
+
+.md-typeset table:not([class]) {
+  border: 1px solid var(--md-typeset-table-color);
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: 0.72rem;
+}
+
+.md-typeset table:not([class]) th {
+  background: var(--md-code-bg-color);
+  font-weight: 600;
+}
+
+.md-typeset table:not([class]) td {
+  vertical-align: top;
+}
+
+/* ── Code ──────────────────────────────────────────────────────────────── */
+
+.md-typeset code {
+  border-radius: 4px;
+}
+
+.md-typeset pre > code {
+  border-radius: 8px;
+}
+
+/* ── Details, of which these pages have sixty-five ─────────────────────── */
+
+.md-typeset details {
+  border-radius: 8px;
+  border-color: var(--md-typeset-table-color);
+  box-shadow: none;
+}
+
+.md-typeset details > summary {
+  background: var(--md-code-bg-color);
+}
+
+.md-typeset details > summary::before {
+  background-color: var(--brand);
+}
+
+/* ── Search mark ───────────────────────────────────────────────────────── */
+
+.md-search-result__teaser mark,
+.md-typeset mark {
+  background: var(--brand-soft);
+  color: inherit;
+}

@@ -25,7 +25,7 @@ use rbx_core::generated::{CheckReport, GeneratedFile};
 const CONFIG_FILE: &str = "rbxapikey.toml";
 const FILE_NAME: &str = "rbxapikey.schema.json";
 const DESCRIPTION: &str = "Declarative Open Cloud API keys: scopes, expiry, allowed CIDRs, and \
-                           where each key's secret is written. See docs/apikey.md.";
+                           where each key's secret is written. See https://rbx-forge.github.io/rbx-apikey/configuration/";
 
 #[derive(Parser, Debug)]
 #[command(

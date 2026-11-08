@@ -17,3 +17,6 @@
 # Scratch output of the scope catalog workflow.
 /catalog.log
 /verify.log
+
+# mkdocs build output
+/site

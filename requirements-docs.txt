@@ -1,0 +1,4 @@
+# The documentation site. Pinned, not floating: a minor release changing how a
+# page renders is not something a docs push should find out about. Bump
+# deliberately, after running mkdocs build --strict locally on the new one.
+mkdocs-material==9.5.44

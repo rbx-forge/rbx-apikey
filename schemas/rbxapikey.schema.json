@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "rbxapikey.toml",
-  "description": "Declarative Open Cloud API keys: scopes, expiry, allowed CIDRs, and where each key's secret is written. See docs/apikey.md.",
+  "description": "Declarative Open Cloud API keys: scopes, expiry, allowed CIDRs, and where each key's secret is written. See https://rbx-forge.github.io/rbx-apikey/configuration/",
   "type": "object",
   "properties": {
     "keys": {
