@@ -1422,8 +1422,8 @@ dependencies = [
 
 [[package]]
 name = "rbx-core"
-version = "0.12.0"
-source = "git+https://github.com/rbx-forge/rbx-cli?branch=main#42e02b2200b4c6115ad3ef4907b2a25a946f214f"
+version = "0.1.0"
+source = "git+https://github.com/rbx-forge/rbx-core?tag=v0.1.0#3078ea622d182cdac4429726cb1a6dbbefd7cd85"
 dependencies = [
  "anyhow",
  "bit-vec",
