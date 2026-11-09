@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-09
+
 ### Security
 
 - Release archives carry a build provenance attestation: `gh attestation verify <zip> --repo rbx-forge/rbx-apikey`. The build jobs run with read access only, and the publishing job alone may write.
