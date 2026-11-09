@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Security
+
+- Release archives carry a build provenance attestation: `gh attestation verify <zip> --repo rbx-forge/rbx-apikey`. The build jobs run with read access only, and the publishing job alone may write.
+
 ### Fixed
 
 - The help of `doctor --check-ip` pointed at `docs/doctor.md`, a path that does not exist beside an installed binary.
