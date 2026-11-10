@@ -170,16 +170,24 @@ pub fn cleanup(resolved: &Resolved, delete_file: bool) -> CleanupResult {
     if resolved.backend == Backend::File {
         let path = Path::new(&resolved.target);
         if delete_file {
-            if path.is_file() {
-                if std::fs::remove_file(path).is_ok() {
-                    result
+            // `try_exists`, because `is_file` answers "no" to a file it could
+            // not look at, and then nothing was deleted and nothing was said:
+            // a dead secret left on disk with no line telling anyone.
+            match path.try_exists() {
+                Ok(false) => {}
+                Ok(true) => match std::fs::remove_file(path) {
+                    Ok(()) => result
                         .auto_cleaned
-                        .push(format!("deleted secret file: {}", resolved.target));
-                } else {
-                    result
-                        .manual_action_needed
-                        .push(format!("could not delete secret file: {}", resolved.target));
-                }
+                        .push(format!("deleted secret file: {}", resolved.target)),
+                    Err(e) => result.manual_action_needed.push(format!(
+                        "could not delete secret file: {}: {e}",
+                        resolved.target
+                    )),
+                },
+                Err(e) => result.manual_action_needed.push(format!(
+                    "could not look at secret file: {}: {e}; check it and delete it by hand",
+                    resolved.target
+                )),
             }
         } else {
             result
@@ -470,6 +478,29 @@ mod tests {
         std::fs::create_dir(&directory).unwrap();
         let err = read(&file_at(&directory), Some(&entry)).unwrap_err();
         assert!(format!("{err:#}").contains("deploy.env"), "{err:#}");
+    }
+
+    /// A secret file that cannot be looked at is reported as needing a hand,
+    /// naming it. `is_file` answered "no", and cleanup then deleted nothing
+    /// and said nothing.
+    #[test]
+    fn cleanup_reports_a_secret_file_it_cannot_look_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let unlookable = crate::test_support::unlookable(dir.path());
+
+        let result = cleanup(&file_at(&unlookable), true);
+
+        assert!(result.auto_cleaned.is_empty());
+        assert_eq!(result.manual_action_needed.len(), 1);
+        assert!(
+            result.manual_action_needed[0].contains(&unlookable.to_string_lossy().to_string()),
+            "{:?}",
+            result.manual_action_needed
+        );
+
+        // An absent file is nothing to clean, and nothing to report.
+        let absent = cleanup(&file_at(&dir.path().join("absent.env")), true);
+        assert!(absent.auto_cleaned.is_empty() && absent.manual_action_needed.is_empty());
     }
 
     /// Absent and empty are still a missing secret, for the caller to judge.
