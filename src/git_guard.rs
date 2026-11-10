@@ -50,7 +50,7 @@ use anyhow::{bail, Result};
 
 use crate::secret_store::{Backend, Resolved};
 
-/// What a lockfile's relationship to git turned out to be.
+/// What a secret file's relationship to git turned out to be.
 #[derive(Debug, PartialEq, Eq)]
 pub enum GitStatus {
     /// Not inside a git work tree: nothing to leak into.
@@ -58,7 +58,11 @@ pub enum GitStatus {
     /// Inside a repository, and git ignores the path.
     Ignored,
     /// Inside a repository, and git does **not** ignore the path.
-    Tracked,
+    NotIgnored,
+    /// Inside a repository, and git already tracks the file. An ignore rule
+    /// does not apply to a tracked file, so `check-ignore` keeps saying "not
+    /// ignored" after the line is added, and the advice has to say so.
+    InIndex,
     /// The question could not be answered, with the reason.
     Unknown(String),
 }
@@ -110,6 +114,13 @@ pub fn destination(resolved: &Resolved, lock_path: &Path) -> Option<PathBuf> {
 pub struct Refused {
     pub path: PathBuf,
     pub is_lockfile: bool,
+    /// Git already tracks the file, so an ignore line alone does nothing.
+    pub in_index: bool,
+    /// The `.gitignore` line that covers the file, anchored at the root of
+    /// its repository.
+    pub ignore_line: String,
+    /// The file relative to the root of its repository, for `git rm`.
+    pub from_root: Option<String>,
     pub keys: Vec<String>,
 }
 
@@ -137,13 +148,23 @@ pub fn check_all(writes: &[(String, Resolved)], lock_path: &Path, write: Write) 
         if passed.contains(&path) {
             continue;
         }
-        match status_of(&path) {
+        let examined = examine(&path);
+        match examined.status {
             GitStatus::NotARepo | GitStatus::Ignored => passed.push(path),
-            GitStatus::Tracked => refused.push(Refused {
-                path,
-                is_lockfile: resolved.backend == Backend::Lockfile,
-                keys: vec![key.clone()],
-            }),
+            GitStatus::NotIgnored | GitStatus::InIndex => {
+                let from_root = examined.resolved.as_ref().and_then(from_repo_root);
+                refused.push(Refused {
+                    ignore_line: match &from_root {
+                        Some(rel) => format!("/{rel}"),
+                        None => file_name_of(&path),
+                    },
+                    in_index: examined.status == GitStatus::InIndex,
+                    from_root,
+                    path,
+                    is_lockfile: resolved.backend == Backend::Lockfile,
+                    keys: vec![key.clone()],
+                })
+            }
             // An unanswerable check is not a verdict: git missing from PATH
             // is not evidence that the file is safe, nor that it is not.
             GitStatus::Unknown(why) => {
@@ -166,23 +187,45 @@ pub fn check_all(writes: &[(String, Resolved)], lock_path: &Path, write: Write) 
 /// it.
 ///
 /// `path` need not exist yet, nor its directory: a secret file is usually
-/// written into a `.secrets/` the first write creates.
-pub fn status_of(path: &Path) -> GitStatus {
-    // Absolute, because git resolves the path after `-C` has moved it into
-    // `dir`: a relative `.secrets/deploy.env` would be looked up as
-    // `.secrets/.secrets/deploy.env`.
-    let path = match std::path::absolute(path) {
-        Ok(p) => p,
-        Err(e) => {
-            return GitStatus::Unknown(format!("{} has no absolute form: {e}", path.display()))
+/// written into a `.secrets/` the first write creates. The commands go
+/// through [`check_all`]; this is the question on its own, for the tests.
+#[cfg(test)]
+fn status_of(path: &Path) -> GitStatus {
+    examine(path).status
+}
+
+/// A destination as git will see it: the file, and the directory git runs in.
+#[derive(Debug, Clone)]
+struct Resolution {
+    target: PathBuf,
+    dir: PathBuf,
+}
+
+#[derive(Debug)]
+struct Examined {
+    status: GitStatus,
+    resolved: Option<Resolution>,
+}
+
+fn examine(path: &Path) -> Examined {
+    let resolved = match resolve(path) {
+        Ok(r) => r,
+        Err(why) => {
+            return Examined {
+                status: GitStatus::Unknown(why),
+                resolved: None,
+            }
         }
     };
-    let dir = match nearest_existing_dir(&path) {
-        Ok(d) => d,
-        Err(why) => return GitStatus::Unknown(why),
-    };
+    let status = git_status(&resolved);
+    Examined {
+        status,
+        resolved: Some(resolved),
+    }
+}
 
-    match in_work_tree(&dir) {
+fn git_status(r: &Resolution) -> GitStatus {
+    match in_work_tree(&r.dir) {
         Ok(true) => {}
         Ok(false) => return GitStatus::NotARepo,
         Err(why) => return GitStatus::Unknown(why),
@@ -191,19 +234,120 @@ pub fn status_of(path: &Path) -> GitStatus {
     // `check-ignore` exits 0 when the path is ignored, 1 when it is not, and
     // 128 when something else went wrong, which is the case that must not be
     // read as either answer.
-    match Command::new("git")
-        .arg("-C")
-        .arg(&dir)
+    match git(&r.dir)
         .arg("check-ignore")
         .arg("--quiet")
-        .arg(&path)
+        .arg(&r.target)
         .status()
     {
         Ok(s) if s.code() == Some(0) => GitStatus::Ignored,
-        Ok(s) if s.code() == Some(1) => GitStatus::Tracked,
+        Ok(s) if s.code() == Some(1) => {
+            // "Not ignored" is also what git says about a file it tracks,
+            // whatever `.gitignore` holds, and that file needs different
+            // advice: an ignore line does not untrack it.
+            match git(&r.dir)
+                .arg("ls-files")
+                .arg("--error-unmatch")
+                .arg("--")
+                .arg(&r.target)
+                .status()
+            {
+                Ok(s) if s.code() == Some(0) => GitStatus::InIndex,
+                Ok(s) if s.code() == Some(1) => GitStatus::NotIgnored,
+                Ok(s) => GitStatus::Unknown(format!("git ls-files exited {}", s)),
+                Err(e) => GitStatus::Unknown(format!("git could not be run: {e}")),
+            }
+        }
         Ok(s) => GitStatus::Unknown(format!("git check-ignore exited {}", s)),
         Err(e) => GitStatus::Unknown(format!("git could not be run: {e}")),
     }
+}
+
+/// `git -C <dir>`, quiet on stderr: the exit status is the answer, and the
+/// cases that are not one become a warning of their own.
+fn git(dir: &Path) -> Command {
+    let mut c = Command::new("git");
+    c.arg("-C")
+        .arg(dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    c
+}
+
+/// `path` the way git will see it: absolute, the part that exists resolved
+/// through symlinks and junctions, the part not created yet joined on.
+///
+/// Absolute, because git resolves the path after `-C` has moved it into the
+/// directory: a relative `.secrets/deploy.env` would be looked up as
+/// `.secrets/.secrets/deploy.env`. Resolved, because git works out the
+/// repository from the real directory, and a path reaching it through a
+/// symlink (`/tmp` on macOS is one) is "outside the repository" to git: exit
+/// 128, which reads as a check that could not run, and the secret would be
+/// written with a warning instead of refused.
+fn resolve(path: &Path) -> std::result::Result<Resolution, String> {
+    let abs = std::path::absolute(path)
+        .map_err(|e| format!("{} has no absolute form: {e}", path.display()))?;
+    let existing = nearest_existing_dir(&abs)?;
+    let rest = abs.strip_prefix(&existing).unwrap_or(Path::new(""));
+    let dir = plain(
+        existing
+            .canonicalize()
+            .map_err(|e| format!("{} cannot be resolved: {e}", existing.display()))?,
+    );
+    // The part not created yet, without `.` and `..`: nothing on disk can
+    // redirect it, so it is folded by hand.
+    let mut target = dir.clone();
+    for part in rest.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                target.pop();
+            }
+            other => target.push(other),
+        }
+    }
+    Ok(Resolution { target, dir })
+}
+
+/// A canonical Windows path without its `\\?\` prefix, which git does not
+/// take. A no-op elsewhere.
+fn plain(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(unc) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{unc}"));
+    }
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest),
+        None => path,
+    }
+}
+
+/// The file relative to the root of its repository, with `/` separators, or
+/// `None` when git cannot say where the root is.
+fn from_repo_root(r: &Resolution) -> Option<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&r.dir)
+        .arg("rev-parse")
+        .arg("--show-toplevel")
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let top = String::from_utf8(out.stdout).ok()?;
+    let top = plain(PathBuf::from(top.trim()).canonicalize().ok()?);
+    let rel = r.target.strip_prefix(&top).ok()?;
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+fn file_name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| crate::lock::FILE.to_string())
 }
 
 /// The closest directory above `path` that is there, for git to run in.
@@ -245,51 +389,49 @@ fn in_work_tree(dir: &Path) -> std::result::Result<bool, String> {
     }
 }
 
-/// The `.gitignore` line to suggest for `path`.
-///
-/// A secret file's directory rather than the file, when the config names one
-/// relative to the project: `.secrets/` covers the next key too.
-fn ignore_line(path: &Path, is_lockfile: bool) -> String {
-    let file_name = || {
-        path.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| crate::lock::FILE.to_string())
-    };
-    if is_lockfile || path.is_absolute() {
-        return file_name();
-    }
-    match path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        Some(dir) => format!("{}/", dir.to_string_lossy().replace('\\', "/")),
-        None => file_name(),
-    }
-}
-
 /// The refusal for a whole run, worded so the reader can act without opening
 /// the docs: every file, the keys headed for it, and the lines to add.
+///
+/// Each line is the file's path from the root of its repository, anchored
+/// with a leading `/`, for the `.gitignore` at that root. The path the config
+/// spells is no use there: `./.secrets/` matches nothing, `../x/` is not a
+/// pattern, and a directory relative to where the command ran anchors
+/// somewhere else.
 pub fn refusal(refused: &[Refused], write: Write) -> String {
     let files: Vec<String> = refused
         .iter()
         .map(|r| format!("    {} ({})", r.path.display(), r.keys.join(", ")))
         .collect();
-    let mut lines: Vec<String> = Vec::new();
-    for r in refused {
-        let line = ignore_line(&r.path, r.is_lockfile);
-        if !lines.contains(&line) {
-            lines.push(line);
-        }
-    }
+    let lines: Vec<&str> = refused.iter().map(|r| r.ignore_line.as_str()).collect();
     let mut text = format!(
         "These files would hold key secrets in plain text, and git is not ignoring them:\n\n\
          {}\n\n\
          {} would put live Open Cloud credentials one `git add` away from being published, \
          which is the one failure this tool exists to prevent. {}\n\n\
-         Add these lines to .gitignore, then run the same command again:\n\n    \
+         Add these lines to the .gitignore at the root of the repository, then run the same \
+         command again:\n\n    \
          {}",
         files.join("\n"),
         write.doing(),
         write.nothing(),
         lines.join("\n    "),
     );
+    let in_index: Vec<String> = refused
+        .iter()
+        .filter(|r| r.in_index)
+        .map(|r| match &r.from_root {
+            Some(rel) => format!("    git rm --cached -- {rel}"),
+            None => format!("    git rm --cached -- {}", r.path.display()),
+        })
+        .collect();
+    if !in_index.is_empty() {
+        text.push_str(&format!(
+            "\n\nGit already tracks some of them, and an ignore line does not untrack a file. \
+             From the root of the repository, also run:\n\n{}\n\n\
+             A secret that was ever pushed in one of them is published: rotate it.",
+            in_index.join("\n")
+        ));
+    }
     if refused.iter().any(|r| r.is_lockfile) {
         text.push_str(
             "\n\nOr keep the secret out of the lockfile entirely, which is the better answer for \
@@ -353,7 +495,120 @@ pub(crate) mod tests {
         let dir = repo();
         let lock = dir.path().join("rbxapikey.lock.toml");
         std::fs::write(&lock, "").unwrap();
-        assert_eq!(status_of(&lock), GitStatus::Tracked);
+        assert_eq!(status_of(&lock), GitStatus::NotIgnored);
+    }
+
+    /// A link to `target` at `link`: a symlink on Unix, a junction on
+    /// Windows, where neither needs elevated rights.
+    fn link(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        assert!(Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    /// Reached through a link, the destination is handed to git as the real
+    /// path, joined to the part not created yet. Given the linked path, git
+    /// on Unix answers "outside repository" (exit 128), which read as a check
+    /// that could not run, and the secret was written with a warning.
+    #[test]
+    fn a_path_through_a_link_is_resolved_for_git() {
+        let base = tempfile::tempdir().unwrap();
+        let real = base.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let linked = base.path().join("linked");
+        link(&real, &linked);
+
+        let r = resolve(&linked.join(".secrets").join("deploy.env")).unwrap();
+
+        let real = plain(real.canonicalize().unwrap());
+        assert_eq!(r.dir, real);
+        assert_eq!(r.target, real.join(".secrets").join("deploy.env"));
+    }
+
+    /// And end to end: a repository reached through a link is refused like
+    /// any other, not let through as "could not check".
+    #[test]
+    fn a_repository_reached_through_a_link_is_still_checked() {
+        let base = tempfile::tempdir().unwrap();
+        let real = base.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&real)
+            .args(["init", "--quiet"])
+            .status()
+            .unwrap()
+            .success());
+        let linked = base.path().join("linked");
+        link(&real, &linked);
+
+        assert_eq!(
+            status_of(&linked.join("rbxapikey.lock.toml")),
+            GitStatus::NotIgnored
+        );
+    }
+
+    /// A file git already tracks stays "not ignored" whatever `.gitignore`
+    /// says, so it is told apart, and the refusal says to untrack it.
+    #[test]
+    fn a_file_git_already_tracks_is_told_apart_and_untracked() {
+        let dir = repo();
+        let lock = dir.path().join("rbxapikey.lock.toml");
+        std::fs::write(&lock, "").unwrap();
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["add", "rbxapikey.lock.toml"])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(dir.path().join(".gitignore"), "/rbxapikey.lock.toml\n").unwrap();
+
+        assert_eq!(status_of(&lock), GitStatus::InIndex);
+        let text = format!(
+            "{}",
+            check_all(&one("deploy", lockfile()), &lock, Write::Rotate).unwrap_err()
+        );
+        assert!(
+            text.contains("git rm --cached -- rbxapikey.lock.toml"),
+            "{text}"
+        );
+    }
+
+    /// The suggested line is the path from the repository root, anchored,
+    /// whatever directory the command ran in and however the config spelled
+    /// the path. Proved by adding it and asking git again.
+    #[test]
+    fn the_ignore_line_is_anchored_at_the_repository_root() {
+        let dir = repo();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let lock = sub.join("rbxapikey.lock.toml");
+        // As a config in `sub` would spell `../.secrets/ci.env`.
+        let ci = sub.join("..").join(".secrets").join("ci.env");
+        let writes = vec![
+            ("deploy".to_string(), lockfile()),
+            ("ci".to_string(), secret_file(&ci)),
+        ];
+
+        let text = format!("{}", check_all(&writes, &lock, Write::Create).unwrap_err());
+        assert!(text.contains("\n    /sub/rbxapikey.lock.toml"), "{text}");
+        assert!(text.contains("\n    /.secrets/ci.env"), "{text}");
+
+        std::fs::write(
+            dir.path().join(".gitignore"),
+            "/sub/rbxapikey.lock.toml\n/.secrets/ci.env\n",
+        )
+        .unwrap();
+        check_all(&writes, &lock, Write::Create).unwrap();
     }
 
     /// And the case the documentation describes, which must pass silently.
@@ -375,7 +630,7 @@ pub(crate) mod tests {
         let dir = repo();
         let file = dir.path().join(".secrets").join("deploy.env");
 
-        assert_eq!(status_of(&file), GitStatus::Tracked);
+        assert_eq!(status_of(&file), GitStatus::NotIgnored);
 
         std::fs::write(dir.path().join(".gitignore"), ".secrets/\n").unwrap();
         assert_eq!(status_of(&file), GitStatus::Ignored);
@@ -454,6 +709,9 @@ pub(crate) mod tests {
         Refused {
             path: PathBuf::from(path),
             is_lockfile,
+            in_index: false,
+            ignore_line: format!("/{path}"),
+            from_root: Some(path.to_string()),
             keys: vec!["deploy".into()],
         }
     }
@@ -468,12 +726,13 @@ pub(crate) mod tests {
         assert!(text.contains("Nothing has been created"), "{text}");
     }
 
-    /// A secret file's refusal suggests its directory, and does not offer a
-    /// secret file as the way out of a secret file.
+    /// A secret file's refusal names its line, and does not offer a secret
+    /// file as the way out of a secret file.
     #[test]
-    fn a_secret_file_refusal_names_its_directory() {
+    fn a_secret_file_refusal_does_not_offer_a_secret_file() {
         let text = refusal(&[refused(".secrets/deploy.env", false)], Write::Rotate);
-        assert!(text.contains("\n    .secrets/"), "{text}");
+        assert!(text.contains("\n    /.secrets/deploy.env"), "{text}");
+        assert!(!text.contains("git rm"), "{text}");
         assert!(!text.contains("default_secret_file"), "{text}");
         assert!(text.contains("Nothing has been rotated"), "{text}");
     }
