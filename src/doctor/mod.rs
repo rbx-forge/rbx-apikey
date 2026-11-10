@@ -123,7 +123,7 @@ pub async fn run(cli: DoctorCli, global: &GlobalFlags) -> Result<()> {
     r.push(validity_section(&facts));
     r.push(allowlist_section(&cli, &facts, &ip::IpEcho::default()).await);
     r.push(coverage_section(&facts, std::path::Path::new(".")));
-    r.push(probe_section(&cli, global, &active, &facts, &probe::Probe::default()).await);
+    r.push(probe_section(&cli, global, &active, &probe::Probe::default()).await);
 
     r.print();
 
@@ -625,11 +625,14 @@ fn coverage_section(facts: &Facts, dir: &std::path::Path) -> Section {
 /// (the target line, the outcome, and the explanation attached to a refusal)
 /// can run against a mock server. `run` passes a default one, which is the real
 /// Open Cloud host.
+///
+/// The key's stored scopes are not consulted. Roblox answers this read
+/// without `universe:read`, so whether the key carries it neither explains a
+/// refusal nor follows from a pass.
 async fn probe_section(
     cli: &DoctorCli,
     global: &GlobalFlags,
     active: &Option<ActiveKey>,
-    facts: &Facts,
     probe: &probe::Probe,
 ) -> Section {
     let mut s = Section::new("Read probe");
@@ -662,13 +665,23 @@ async fn probe_section(
     ));
 
     match probe.read_universe(&active.secret, universe_id).await {
-        probe::ProbeOutcome::Ok { universe_name } => s.push(Line::ok(
-            "authenticated read",
-            match universe_name {
-                Some(name) => format!("200: read \"{name}\""),
-                None => "200".to_string(),
-            },
-        )),
+        probe::ProbeOutcome::Ok { universe_name } => {
+            s.push(Line::ok(
+                "authenticated read",
+                match universe_name {
+                    Some(name) => format!("200: read \"{name}\""),
+                    None => "200".to_string(),
+                },
+            ));
+            // Said, because "the read worked" is easily taken for "the key
+            // has its scopes". Roblox answers this read without
+            // `universe:read`, so it shows neither that scope nor any other.
+            s.push(Line::info(
+                "scopes",
+                "not tested: Roblox answers this read without universe:read, so a 200 shows \
+                 the key is accepted, not what it may do",
+            ));
+        }
         probe::ProbeOutcome::Refused { status, message } => {
             let detail = if message.is_empty() {
                 status.to_string()
@@ -687,16 +700,6 @@ async fn probe_section(
             "Roblox was not reached at all. This is the network between here and \
              apis.roblox.com, not the key.",
         )),
-    }
-
-    // A refusal is far easier to read next to what the key is allowed to do.
-    if let Facts::Known(f) = facts {
-        if !f.grants("universe", "read") {
-            s.push(Line::warn(
-                "note",
-                "the key does not carry universe:read, which this probe needs",
-            ));
-        }
     }
 
     s
@@ -1326,14 +1329,7 @@ mod tests {
             });
             let probe = probe::Probe::default().with_base_url(server.uri());
 
-            probe_section(
-                &cli,
-                &global,
-                &active,
-                &Facts::Unavailable("n/a".into()),
-                &probe,
-            )
-            .await
+            probe_section(&cli, &global, &active, &probe).await
         }
 
         fn read_line(section: &Section) -> &Line {
@@ -1353,6 +1349,32 @@ mod tests {
             assert_eq!(line.status, report::Status::Ok);
             assert!(line.detail.contains("My Game"), "got {}", line.detail);
             assert!(line.action.is_none());
+        }
+
+        /// Roblox answers this read without `universe:read` (measured on
+        /// 2026-11-10), so a pass proves nothing about scopes and the section
+        /// has to say so rather than let "the read worked" stand for "the key
+        /// has its scopes". Nor may any line claim the read needs the scope.
+        #[tokio::test]
+        async fn a_200_says_it_proves_nothing_about_scopes() {
+            let server = answering(200, r#"{"displayName":"My Game"}"#).await;
+            let section = section(&server).await;
+
+            let scopes = section
+                .lines
+                .iter()
+                .find(|l| l.label == "scopes")
+                .expect("a pass says what it did not test");
+            assert_eq!(scopes.status, report::Status::Info);
+            assert!(
+                scopes.detail.contains("not tested"),
+                "got {}",
+                scopes.detail
+            );
+            assert!(section
+                .lines
+                .iter()
+                .all(|l| !l.detail.contains("this probe needs")));
         }
 
         /// The one nobody guesses. A 401 that only said "unauthorized" would
@@ -1384,12 +1406,14 @@ mod tests {
 
         /// 401 and 403 are indistinguishable from inside a script and mean
         /// different things, so the wrong one reaching the reader is the
-        /// failure mode this crate exists to prevent.
+        /// failure mode this crate exists to prevent. And a 403 on this read
+        /// is not a missing scope, since Roblox does not check one here:
+        /// advice to widen the key would be advice the probe cannot back.
         #[tokio::test]
-        async fn a_403_fails_and_sends_the_reader_to_the_scopes() {
+        async fn a_403_fails_without_blaming_a_scope() {
             let server = answering(
                 403,
-                r#"{"code":"PERMISSION_DENIED","message":"missing scope universe:read"}"#,
+                r#"{"code":"PERMISSION_DENIED","message":"Insufficient permissions"}"#,
             )
             .await;
             let section = section(&server).await;
@@ -1399,8 +1423,11 @@ mod tests {
             assert!(line.detail.contains("403"), "got {}", line.detail);
 
             let action = line.action.as_ref().expect("a failure carries its remedy");
-            assert!(action.contains("scope"), "got {action}");
-            assert!(action.contains("rbx-apikey update"), "got {action}");
+            assert!(
+                action.contains("not a missing universe:read"),
+                "got {action}"
+            );
+            assert!(!action.contains("rbx-apikey update"), "got {action}");
             assert!(!action.contains("IP allowlist"), "got {action}");
         }
 
