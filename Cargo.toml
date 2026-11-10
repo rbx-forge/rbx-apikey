@@ -1,6 +1,6 @@
 [package]
 name = "rbx-apikey"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 # Set by a dependency, not by this crate's own sources: `image`, which arrives
 # through `rbx-core`, declares 1.88. It moves when a dependency moves it; the
