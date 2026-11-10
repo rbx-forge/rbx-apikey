@@ -15,7 +15,7 @@ rbx-apikey doctor --check-ip         # also compare the IP allowlist
 | `--no-probe` | Skip the authenticated read |
 | `--check-ip` | Compare the allowlist with this machine's public IP (asks `api.ipify.org`) |
 
-`--env`, `--universe-id` choose the probe target; with one env in `rbxplace.toml`, that one is used.
+`--env`, `--universe-id` choose the probe target; with one env in `rbxplace.toml`, that one is used. An `rbxplace.toml` that cannot be read or parsed fails the probe, naming the file and the error.
 
 ```
 Credentials
