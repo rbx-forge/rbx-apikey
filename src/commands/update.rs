@@ -139,7 +139,7 @@ async fn update_one(
         // secret where it was and the key as it was.
         git_guard::check(&new_resolved, lock_path, git_guard::Write::Move)
             .map_err(|e| anyhow::anyhow!("\"{name}\": {e}"))?;
-        let secret = secret_store::read(&previous_resolved, Some(&entry)).ok_or_else(|| {
+        let secret = secret_store::read(&previous_resolved, Some(&entry))?.ok_or_else(|| {
             anyhow::anyhow!(
                 "\"{}\": cannot migrate secret, not found at previous location ({}: {}). Run `rbx-apikey regenerate {}` after updating to create a fresh secret at the new location.",
                 name,

@@ -79,7 +79,7 @@ pub fn run(expiry_only: bool, sort: Option<&str>, format: OutputFormat) -> Resul
                         &universe_ids_for_key(&cfg, &lk, key_cfg),
                         // The secret is read to see whether it is there, and
                         // the answer that leaves this function is the boolean.
-                        secret_store::read(&resolved, Some(entry)).is_some(),
+                        secret_store::read(&resolved, Some(entry))?.is_some(),
                         &resolved.backend,
                     )
                 }
@@ -143,7 +143,7 @@ pub fn run(expiry_only: bool, sort: Option<&str>, format: OutputFormat) -> Resul
             println!("  {}  {}{}", name, expiry_str, orphan_tag);
         } else {
             let resolved = secret_store::stored_backend(&cfg, key_cfg, name, Some(entry));
-            let secret = secret_store::read(&resolved, Some(entry));
+            let secret = secret_store::read(&resolved, Some(entry))?;
             let secret_status: String = if resolved.backend == secret_store::Backend::External {
                 "held elsewhere (printed with --stdout)".to_string()
             } else if secret.is_some() {

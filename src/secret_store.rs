@@ -75,32 +75,32 @@ pub fn backend_for(cfg: &Config, key_cfg: Option<&KeyConfig>, tool_name: &str) -
     }
 }
 
-/// Returns None if the secret is missing or empty (does NOT error: callers decide).
-pub fn read(resolved: &Resolved, lock_entry: Option<&LockEntry>) -> Option<String> {
+/// The stored secret, or `Ok(None)` when there is none: no entry, no file, or
+/// an empty one. Callers decide what a missing secret means.
+///
+/// A secret file that is there and cannot be looked at or read is an error
+/// naming it, and not a missing secret. Read as missing, `update` said a
+/// secret it could not open was "not found" and sent the reader to rotate a
+/// key whose secret was fine, and `status` and `list` reported it missing.
+pub fn read(resolved: &Resolved, lock_entry: Option<&LockEntry>) -> Result<Option<String>> {
     match resolved.backend {
-        Backend::Lockfile => {
-            let entry = lock_entry?;
-            let s = entry.secret.as_ref()?;
-            if s.is_empty() {
-                None
-            } else {
-                Some(s.clone())
-            }
-        }
+        Backend::Lockfile => Ok(lock_entry
+            .and_then(|e| e.secret.clone())
+            .filter(|s| !s.is_empty())),
         Backend::File => {
             let path = Path::new(&resolved.target);
-            if !path.is_file() {
-                return None;
+            let there = path
+                .try_exists()
+                .with_context(|| format!("failed to look at {}", path.display()))?;
+            if !there {
+                return Ok(None);
             }
-            let raw = std::fs::read_to_string(path).ok()?;
+            let raw = std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
             let trimmed = raw.trim_end().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
+            Ok((!trimmed.is_empty()).then_some(trimmed))
         }
-        Backend::External => None,
+        Backend::External => Ok(None),
     }
 }
 
@@ -382,7 +382,7 @@ mod tests {
         assert!(entry.secret.is_none());
         assert!(entry.secret_file.is_none());
         assert!(entry.secret_external);
-        assert_eq!(read(&external(), Some(&entry)), None);
+        assert_eq!(read(&external(), Some(&entry)).unwrap(), None);
     }
 
     /// The config cannot know a past `--stdout` sent the secret elsewhere, so
@@ -438,11 +438,51 @@ mod tests {
         // File backend clears entry.secret so the lockfile doesn't leak.
         assert!(entry.secret.is_none());
         // Read back from disk.
-        let got = read(&resolved, Some(&entry)).unwrap();
+        let got = read(&resolved, Some(&entry)).unwrap().unwrap();
         assert_eq!(got, "S3CR3T");
         // Cleanup
         let cleanup = cleanup(&resolved, true);
         assert_eq!(cleanup.auto_cleaned.len(), 1);
         assert!(!Path::new(&resolved.target).exists());
+    }
+
+    fn file_at(path: &Path) -> Resolved {
+        Resolved {
+            backend: Backend::File,
+            target: path.to_string_lossy().to_string(),
+        }
+    }
+
+    /// A secret file that cannot be looked at, or is there and cannot be
+    /// read, is an error naming it. `is_file` and `.ok()` read both as a
+    /// missing secret.
+    #[test]
+    fn a_secret_file_that_cannot_be_read_is_not_a_missing_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = entry_with(None, None);
+
+        let unlookable = crate::test_support::unlookable(dir.path());
+        let err = read(&file_at(&unlookable), Some(&entry)).unwrap_err();
+        assert!(format!("{err:#}").contains("failed to look at"), "{err:#}");
+
+        // A directory where the file belongs: there, and not readable as one.
+        let directory = dir.path().join("deploy.env");
+        std::fs::create_dir(&directory).unwrap();
+        let err = read(&file_at(&directory), Some(&entry)).unwrap_err();
+        assert!(format!("{err:#}").contains("deploy.env"), "{err:#}");
+    }
+
+    /// Absent and empty are still a missing secret, for the caller to judge.
+    #[test]
+    fn an_absent_or_empty_secret_file_is_a_missing_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = entry_with(None, None);
+
+        let absent = dir.path().join("absent.env");
+        assert_eq!(read(&file_at(&absent), Some(&entry)).unwrap(), None);
+
+        let empty = dir.path().join("empty.env");
+        std::fs::write(&empty, "\n").unwrap();
+        assert_eq!(read(&file_at(&empty), Some(&entry)).unwrap(), None);
     }
 }

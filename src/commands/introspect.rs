@@ -17,7 +17,7 @@ pub async fn run(global: &GlobalFlags, name: &str) -> Result<()> {
         .ok_or_else(|| anyhow!("\"{}\" has no entry in {}", name, lock::FILE))?;
 
     let resolved = secret_store::stored_backend(&cfg, key_cfg, name, Some(entry));
-    let secret = secret_store::read(&resolved, Some(entry)).ok_or_else(|| {
+    let secret = secret_store::read(&resolved, Some(entry))?.ok_or_else(|| {
         anyhow!(
             "\"{}\" secret not available from backend \"{}\" (target: {})",
             name,
