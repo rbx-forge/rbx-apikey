@@ -220,6 +220,9 @@ pub(crate) async fn delete_one(
     // next: saved once at the end, a run stopped there kept listing as live a
     // key that no longer existed.
     if let Err(e) = lock::save_to(lk, lock_path) {
+        // Memory follows the disk. Left out of it, the entry would vanish
+        // with the next key's save, right after being reported as still there.
+        lock::set(lk, name, entry.clone());
         println!(
             "{}",
             format!(
@@ -320,6 +323,32 @@ mod tests {
         signed_in: u64,
         delete_status: u16,
     ) -> (bool, lock::Lock, MockServer) {
+        let (client, server) = signed_in_client(cookie, signed_in, delete_status).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join(lock::FILE);
+        let mut lk = lock_with_key();
+        lock::save_to(&lk, &lock_path).unwrap();
+
+        let done = delete_one(
+            &config::Config::default(),
+            &mut lk,
+            &client,
+            "deploy",
+            true,
+            false,
+            &lock_path,
+        )
+        .await;
+        (done, lock::load_from(&lock_path).unwrap(), server)
+    }
+
+    /// A client past its session check, and the server answering it.
+    async fn signed_in_client(
+        cookie: &str,
+        signed_in: u64,
+        delete_status: u16,
+    ) -> (RbxApiKeyClient, MockServer) {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/users/authenticated"))
@@ -338,11 +367,21 @@ mod tests {
             .with_base_url(server.uri())
             .with_users_base_url(server.uri());
         client.require_valid_session().await.unwrap();
+        (client, server)
+    }
 
+    /// Roblox deleted the key and the lockfile could not be saved: the record
+    /// is still on disk, so it has to be back in memory as well. Left out, the
+    /// next key's save wrote a lockfile without it, a moment after this one
+    /// was reported as still listed.
+    #[tokio::test]
+    async fn a_delete_whose_save_fails_keeps_the_record_in_memory_too() {
+        let (client, _server) = signed_in_client("delete-save-fails", CREATOR, 200).await;
         let dir = tempfile::tempdir().unwrap();
+        // A directory where the lockfile belongs: nothing can be written there.
         let lock_path = dir.path().join(lock::FILE);
+        std::fs::create_dir(&lock_path).unwrap();
         let mut lk = lock_with_key();
-        lock::save_to(&lk, &lock_path).unwrap();
 
         let done = delete_one(
             &config::Config::default(),
@@ -354,7 +393,9 @@ mod tests {
             &lock_path,
         )
         .await;
-        (done, lock::load_from(&lock_path).unwrap(), server)
+
+        assert!(!done);
+        assert!(lock::get(&lk, "deploy").is_some());
     }
 
     async fn delete_requests(server: &MockServer) -> usize {

@@ -1,5 +1,7 @@
 //! `rbx-apikey regenerate <key>|--all`: rotate the API key secret.
 
+use std::path::Path;
+
 use anyhow::{bail, Result};
 use colored::Colorize;
 use dialoguer::Confirm;
@@ -85,10 +87,22 @@ pub async fn run(
     // single-key path above has already paid for this.
     client.require_valid_session().await?;
 
+    // No save after each key: `regenerate_one` writes the lockfile itself, as
+    // soon as the new secret is in it and before it asks anything.
     let mut outcomes = Vec::with_capacity(names.len());
     for n in &names {
-        outcomes.push(regenerate_one(&cfg, &mut lk, &client, n, clean_files, stdout).await);
-        lock::save(&lk)?;
+        outcomes.push(
+            regenerate_one(
+                &cfg,
+                &mut lk,
+                &client,
+                n,
+                clean_files,
+                stdout,
+                Path::new(lock::FILE),
+            )
+            .await,
+        );
     }
 
     let invalidated = outcomes.iter().filter(|o| o.invalidated_the_old()).count();
@@ -165,6 +179,7 @@ async fn regenerate_one(
     name: &str,
     clean_files: bool,
     stdout: bool,
+    lock_path: &Path,
 ) -> Rotation {
     let entry = match lock::get(lk, name).cloned() {
         Some(e) => e,
@@ -244,6 +259,28 @@ async fn regenerate_one(
         None
     };
     lock::set(lk, name, entry);
+    // On disk now, before the question about the old secret file below. With
+    // the lockfile backend the new secret exists nowhere else: the old one
+    // died when Roblox answered, and Roblox will not show this one again.
+    // Saved by the caller after this returned, a run stopped at that question
+    // lost it, and a save that failed lost it without printing it.
+    if let Err(e) = lock::save_to(lk, lock_path) {
+        say!(
+            "{}",
+            format!(
+                "  ✗ Roblox rotated the secret but {} could not be saved: {e:#}",
+                lock_path.display()
+            )
+            .red()
+        );
+        if new_resolved.backend == secret_store::Backend::Lockfile {
+            say!(
+                "{}",
+                format!("  Secret (save this manually): {}", new_secret).yellow()
+            );
+        }
+        return Rotation::Unsaved;
+    }
 
     if backend_changed {
         say!(
@@ -287,7 +324,112 @@ async fn regenerate_one(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
+    use crate::api::RbxApiKeyClient;
+    use crate::lock::LockEntry;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const KEY_ID: &str = "aaaaBBBBccccDDDD";
+
+    /// One key whose secret lives in the lockfile, the default backend: the
+    /// case where the lockfile is the only place a rotated secret can go.
+    fn lock_with_key() -> lock::Lock {
+        let mut lk = lock::Lock::default();
+        lock::set(
+            &mut lk,
+            "deploy",
+            LockEntry {
+                cloud_auth_id: KEY_ID.into(),
+                secret: Some("the-old-secret".into()),
+                secret_file: None,
+                secret_external: false,
+                creator_id: 1234567890,
+                is_enabled: true,
+                created_at: "now".into(),
+                expires_at: None,
+            },
+        );
+        lk
+    }
+
+    /// A server that rotates the key, and a client pointed at it.
+    async fn rotating(cookie: &str) -> (RbxApiKeyClient, MockServer) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/cloud-authentication/v1/apiKey/{KEY_ID}/regenerate"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "apikeySecret": "the-new-secret" })),
+            )
+            .mount(&server)
+            .await;
+        let client = RbxApiKeyClient::new(Some(cookie.to_string()))
+            .with_base_url(server.uri())
+            .with_users_base_url(server.uri());
+        (client, server)
+    }
+
+    /// The old secret died when Roblox answered, and Roblox will not show the
+    /// new one again. It has to be on disk by the time `regenerate_one`
+    /// returns, with no save after it: the caller used to do that save, after
+    /// a question a run could be stopped at.
+    #[tokio::test]
+    async fn a_rotated_secret_is_on_disk_when_regenerate_one_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join(lock::FILE);
+        let mut lk = lock_with_key();
+        lock::save_to(&lk, &lock_path).unwrap();
+        let (client, _server) = rotating("regenerate-stored").await;
+
+        let outcome = regenerate_one(
+            &config::Config::default(),
+            &mut lk,
+            &client,
+            "deploy",
+            true,
+            false,
+            &lock_path,
+        )
+        .await;
+
+        assert_eq!(outcome, Rotation::Stored);
+        let on_disk = lock::load_from(&lock_path).unwrap();
+        assert_eq!(
+            lock::get(&on_disk, "deploy").unwrap().secret.as_deref(),
+            Some("the-new-secret")
+        );
+    }
+
+    /// A lockfile that cannot be written after the rotation is the case with
+    /// both answers at once: the old secret is dead, and the run failed.
+    #[tokio::test]
+    async fn a_rotation_the_lockfile_could_not_take_is_unsaved() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the lockfile belongs: nothing can be written there.
+        let lock_path = dir.path().join(lock::FILE);
+        std::fs::create_dir(&lock_path).unwrap();
+        let mut lk = lock_with_key();
+        let (client, _server) = rotating("regenerate-unsaved").await;
+
+        let outcome = regenerate_one(
+            &config::Config::default(),
+            &mut lk,
+            &client,
+            "deploy",
+            true,
+            false,
+            &lock_path,
+        )
+        .await;
+
+        assert_eq!(outcome, Rotation::Unsaved);
+    }
 
     /// The bug this exists for: `Old secrets invalid as of <now>` printed after
     /// a run that rotated nothing. A refused session rotates nothing, so
