@@ -43,10 +43,17 @@ pub async fn run(
     } else {
         vec![name.unwrap().to_string()]
     };
-    // Every secret this run moves, against git, before the first question and
-    // the first change: a refusal on the third key of `--all` would leave the
-    // first two moved and updated for a reason known from the start.
-    let names = checked_against_git(&cfg, &lk, names, Path::new(lock::FILE))?;
+    // What the run will do, decided once. Every secret it moves is checked
+    // against git before the first question and the first change: a refusal
+    // on the third key of `--all` would leave the first two moved and updated
+    // for a reason known from the start. The loop below does exactly this.
+    let plan = plan(&cfg, &lk, &names);
+    super::guard_plan(
+        &plan,
+        Option::as_ref,
+        Path::new(lock::FILE),
+        git_guard::Write::Move,
+    )?;
     if all {
         say!("Updating {} keys: {}", names.len(), names.join(", "));
     }
@@ -61,19 +68,25 @@ pub async fn run(
 
     // No save after the loop: each key records itself as soon as Roblox has
     // taken its update. See `update_one`.
-    for n in &names {
-        update_one(
-            &cfg,
-            places.as_ref(),
-            &mut lk,
-            &client,
-            n,
-            no_ip,
-            clean_files,
-            skip_confirm,
-            Path::new(lock::FILE),
-        )
-        .await?;
+    for (n, step) in &plan {
+        match step {
+            Err(note) => say!("{}", note.yellow()),
+            Ok(move_to) => {
+                update_one(
+                    &cfg,
+                    places.as_ref(),
+                    &mut lk,
+                    &client,
+                    n,
+                    move_to.as_ref(),
+                    no_ip,
+                    clean_files,
+                    skip_confirm,
+                    Path::new(lock::FILE),
+                )
+                .await?
+            }
+        }
     }
 
     Ok(())
@@ -95,29 +108,24 @@ fn move_target(
     secret_store::backend_differs(&previous, &new).then_some(new)
 }
 
-/// The keys of a run, once git has been asked about every secret the run
-/// would move; the whole run is refused, naming each refused key, if any of
-/// them would land in a file git is not ignoring.
-///
-/// Returned rather than checked on the side, so the run updates the list
-/// that was checked. Only a key whose secret moves writes one: the rest are
-/// not asked about.
-fn checked_against_git(
+/// Each key of the run and where its secret moves, `None` when it stays, or
+/// why the key is skipped: not in the lockfile, or not declared.
+fn plan(
     cfg: &config::Config,
     lk: &lock::Lock,
-    names: Vec<String>,
-    lock_path: &Path,
-) -> Result<Vec<String>> {
-    let writes: Vec<(String, secret_store::Resolved)> = names
+    names: &[String],
+) -> super::Plan<Option<secret_store::Resolved>> {
+    names
         .iter()
-        .filter_map(|n| {
-            let entry = lock::get(lk, n)?;
-            let key_cfg = config::get(cfg, n)?;
-            Some((n.clone(), move_target(cfg, key_cfg, entry, n)?))
+        .map(|n| {
+            let step = match (lock::get(lk, n), config::get(cfg, n)) {
+                (None, _) => Err(format!("skipping \"{}\": not in {}", n, lock::FILE)),
+                (Some(_), None) => Err(super::missing_key_note(cfg, n)),
+                (Some(entry), Some(key_cfg)) => Ok(move_target(cfg, key_cfg, entry, n)),
+            };
+            (n.clone(), step)
         })
-        .collect();
-    git_guard::check_all(&writes, lock_path, git_guard::Write::Move)?;
-    Ok(names)
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -127,29 +135,18 @@ async fn update_one(
     lk: &mut lock::Lock,
     client: &RbxApiKeyClient,
     name: &str,
+    move_to: Option<&secret_store::Resolved>,
     no_ip: bool,
     clean_files: bool,
     skip_confirm: bool,
     lock_path: &Path,
 ) -> Result<()> {
-    let entry = match lock::get(lk, name).cloned() {
-        Some(e) => e,
-        None => {
-            say!(
-                "{}",
-                format!("skipping \"{}\": not in {}", name, lock::FILE).yellow()
-            );
-            return Ok(());
-        }
-    };
-
-    let key_cfg = match config::get(cfg, name) {
-        Some(k) => k,
-        None => {
-            say!("{}", super::missing_key_note(cfg, name).yellow());
-            return Ok(());
-        }
-    };
+    // `plan` skipped the keys missing from either file.
+    let entry = lock::get(lk, name)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("\"{name}\" is not in {}", lock::FILE))?;
+    let key_cfg = config::get(cfg, name)
+        .ok_or_else(|| anyhow::anyhow!("\"{name}\" is not in {}", config::FILE))?;
 
     // Drift check is global (per-env) and runs once at command entry: see
     // `run()`. By the time we get here, the cached `lk.envs` entries for the
@@ -172,14 +169,16 @@ async fn update_one(
     // Detect secret_file change since the last apply and migrate the secret to the new backend
     // BEFORE the Roblox call. Failing here aborts the whole update so we don't talk to Roblox
     // with the local state in a broken half-state.
-    let new_resolved = secret_store::backend_for(cfg, Some(key_cfg), name);
+    // `move_to` is where `plan` said the secret moves, which is where the git
+    // guard looked; when it does not move, it stays where the config puts it.
+    let new_resolved = move_to
+        .cloned()
+        .unwrap_or_else(|| secret_store::backend_for(cfg, Some(key_cfg), name));
     let previous_resolved = secret_store::previous_backend_from_entry(&entry, name);
     // A secret printed with --stdout is held elsewhere: there is nothing here
     // to migrate, and the entry keeps saying where it is.
     let held_elsewhere = previous_resolved.backend == secret_store::Backend::External;
-    // Where the secret moves to was checked against git by `run`, before the
-    // first prompt: see `checked_against_git`.
-    let needs_migration = move_target(cfg, key_cfg, &entry, name).is_some();
+    let needs_migration = move_to.is_some();
     let mut entry = entry;
 
     if needs_migration {
@@ -411,6 +410,41 @@ scopes = ["universe:read"]
         n.iter().map(|s| s.to_string()).collect()
     }
 
+    /// The run's guard, as `run` calls it: on the plan the loop then follows.
+    fn guarded(
+        cfg: &config::Config,
+        lk: &lock::Lock,
+        names: Vec<String>,
+        lock_path: &Path,
+    ) -> Result<()> {
+        super::super::guard_plan(
+            &plan(cfg, lk, &names),
+            Option::as_ref,
+            lock_path,
+            git_guard::Write::Move,
+        )
+    }
+
+    /// The plan says which secrets move and where, and skips a key missing
+    /// from either file.
+    #[test]
+    fn the_plan_says_which_secrets_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, lk) = three_moves(dir.path());
+
+        let steps = plan(&cfg, &lk, &names(&["first", "second", "third", "nope"]));
+        assert_eq!(
+            steps[0].1.as_ref().unwrap().as_ref().unwrap().backend,
+            secret_store::Backend::File
+        );
+        assert_eq!(
+            steps[1].1.as_ref().unwrap().as_ref().unwrap().backend,
+            secret_store::Backend::Lockfile
+        );
+        assert!(steps[2].1.as_ref().unwrap().is_none());
+        assert!(steps[3].1.is_err());
+    }
+
     /// `first` gains a `secret_file`, so its secret moves out of the
     /// lockfile; `second` loses one, so its secret moves into the lockfile;
     /// `third` stays where it is.
@@ -445,18 +479,18 @@ scopes = ["universe:read"]
         let (cfg, lk) = three_moves(dir.path());
 
         std::fs::write(dir.path().join(".gitignore"), "rbxapikey.lock.toml\n").unwrap();
-        let err = checked_against_git(&cfg, &lk, names(&["first"]), &lock_path).unwrap_err();
+        let err = guarded(&cfg, &lk, names(&["first"]), &lock_path).unwrap_err();
         assert!(format!("{err}").contains("first.env"), "{err}");
-        checked_against_git(&cfg, &lk, names(&["second"]), &lock_path).unwrap();
+        guarded(&cfg, &lk, names(&["second"]), &lock_path).unwrap();
 
         std::fs::write(dir.path().join(".gitignore"), ".secrets/\n").unwrap();
-        let err = checked_against_git(&cfg, &lk, names(&["second"]), &lock_path).unwrap_err();
+        let err = guarded(&cfg, &lk, names(&["second"]), &lock_path).unwrap_err();
         assert!(format!("{err}").contains(lock::FILE), "{err}");
         assert!(
             format!("{err}").contains("Nothing has been changed"),
             "{err}"
         );
-        checked_against_git(&cfg, &lk, names(&["first"]), &lock_path).unwrap();
+        guarded(&cfg, &lk, names(&["first"]), &lock_path).unwrap();
     }
 
     /// `--all` is refused as a whole, naming every key whose move was
@@ -468,8 +502,7 @@ scopes = ["universe:read"]
         let lock_path = dir.path().join(lock::FILE);
         let (cfg, lk) = three_moves(dir.path());
 
-        let err = checked_against_git(&cfg, &lk, names(&["first", "second", "third"]), &lock_path)
-            .unwrap_err();
+        let err = guarded(&cfg, &lk, names(&["first", "second", "third"]), &lock_path).unwrap_err();
 
         let text = format!("{err}");
         assert!(text.contains("first.env (first)"), "{text}");
@@ -525,12 +558,12 @@ scopes = ["universe:read"]
         client.require_valid_session().await.unwrap();
 
         update_one(
-            &cfg, None, &mut lk, &client, "first", false, false, true, &lock_path,
+            &cfg, None, &mut lk, &client, "first", None, false, false, true, &lock_path,
         )
         .await
         .expect("the first key is updated");
         update_one(
-            &cfg, None, &mut lk, &client, "second", false, false, true, &lock_path,
+            &cfg, None, &mut lk, &client, "second", None, false, false, true, &lock_path,
         )
         .await
         .expect_err("Roblox refuses the second");

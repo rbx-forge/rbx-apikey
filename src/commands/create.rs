@@ -62,29 +62,20 @@ pub async fn run(
 
     let cfg = config::load()?;
     let mut lk = lock::load()?;
-    let lock_path = Path::new(lock::FILE);
-    // The keys asked for by name or `--all`, checked against git before the
-    // first prompt and before anything is created on Roblox: refusing after
-    // creation leaves a live key whose secret was never stored. The picker
-    // below checks what it picked, once it knows.
-    let requested: Option<Vec<String>> = if all {
+    let places = super::load_places(global)?;
+    let client = make_client(global);
+
+    let names: Vec<String> = if all {
         let mut names: Vec<String> = cfg.keys.keys().cloned().collect();
         names.sort();
         if names.is_empty() {
             bail!("no keys in {}", config::FILE);
         }
-        Some(checked_against_git(
-            &cfg, &lk, names, force, stdout, lock_path,
-        )?)
+        names
+    } else if let Some(n) = name {
+        vec![n.to_string()]
     } else {
-        name.map(|n| checked_against_git(&cfg, &lk, vec![n.to_string()], force, stdout, lock_path))
-            .transpose()?
-    };
-    let places = super::load_places(global)?;
-    let client = make_client(global);
-
-    // No args → interactive picker over keys not yet in lock.
-    let Some(names) = requested else {
+        // No args → interactive picker over keys not yet in lock.
         let mut candidates: Vec<String> = cfg
             .keys
             .keys()
@@ -109,49 +100,34 @@ pub async fn run(
             say!("Nothing selected.");
             return Ok(());
         }
-        let chosen: Vec<String> = selection
+        selection
             .into_iter()
             .map(|i| candidates[i].clone())
-            .collect();
-        let chosen = checked_against_git(&cfg, &lk, chosen, false, false, lock_path)?;
-
-        if no_ip {
-            say!("{}", "--no-ip: keys accept calls from any IP".yellow());
-        }
-
-        let account = client.authenticated_account().await?;
-        let creator_id = account.id;
-        confirm_creator(&account, &format!("{} key(s)", chosen.len()), yes)?;
-
-        for n in &chosen {
-            create_one(
-                &cfg,
-                places.as_ref(),
-                &mut lk,
-                &client,
-                n,
-                creator_id,
-                no_ip,
-                false,
-                skip_verify,
-                false,
-            )
-            .await?;
-            lock::save(&lk)?;
-        }
-        return Ok(());
+            .collect()
     };
 
+    // What the run will write, decided once. The guard checks it before the
+    // first prompt and before anything is created on Roblox, since refusing
+    // after creation leaves a live key whose secret was never stored, and the
+    // loop below writes exactly that.
+    let plan = plan(&cfg, &lk, &names, force, stdout);
+    super::guard_plan(
+        &plan,
+        super::writes,
+        Path::new(lock::FILE),
+        git_guard::Write::Create,
+    )?;
+
     if no_ip {
-        say!("{}", "--no-ip: key accepts calls from any IP".yellow());
+        say!("{}", "--no-ip: keys accept calls from any IP".yellow());
     }
 
     let account = client.authenticated_account().await?;
     let creator_id = account.id;
-    let what = if all {
-        "every key in rbxapikey.toml".to_string()
-    } else {
-        format!("\"{}\"", name.unwrap_or("?"))
+    let what = match (all, name) {
+        (true, _) => "every key in rbxapikey.toml".to_string(),
+        (false, Some(n)) => format!("\"{n}\""),
+        (false, None) => format!("{} key(s)", names.len()),
     };
     confirm_creator(&account, &what, yes)?;
 
@@ -161,42 +137,57 @@ pub async fn run(
             names.len(),
             names.join(", ")
         );
-        for n in &names {
-            create_one(
-                &cfg,
-                places.as_ref(),
-                &mut lk,
-                &client,
-                n,
-                creator_id,
-                no_ip,
-                force,
-                skip_verify,
-                false,
-            )
-            .await?;
-            lock::save(&lk)?;
-        }
-    } else {
-        for n in &names {
-            create_one(
-                &cfg,
-                places.as_ref(),
-                &mut lk,
-                &client,
-                n,
-                creator_id,
-                no_ip,
-                force,
-                skip_verify,
-                stdout,
-            )
-            .await?;
-            lock::save(&lk)?;
+    }
+    for (n, step) in &plan {
+        match step {
+            Err(note) => say!("{}", note.yellow()),
+            Ok(resolved) => {
+                create_one(
+                    &cfg,
+                    places.as_ref(),
+                    &mut lk,
+                    &client,
+                    n,
+                    resolved,
+                    creator_id,
+                    no_ip,
+                    skip_verify,
+                )
+                .await?;
+                lock::save(&lk)?;
+            }
         }
     }
 
     Ok(())
+}
+
+/// Each key of the run and where its secret goes, or why it is skipped: not
+/// declared, or already in the lockfile without `--force`. Under `--stdout`
+/// the secret goes nowhere on disk.
+fn plan(
+    cfg: &config::Config,
+    lk: &lock::Lock,
+    names: &[String],
+    force: bool,
+    stdout: bool,
+) -> super::Plan<secret_store::Resolved> {
+    names
+        .iter()
+        .map(|n| {
+            let step = match config::get(cfg, n) {
+                None => Err(super::missing_key_note(cfg, n)),
+                Some(_) if lock::get(lk, n).is_some() && !force => Err(format!(
+                    "skipping \"{}\": already in {} (use --force to overwrite)",
+                    n,
+                    lock::FILE
+                )),
+                Some(_) if stdout => Ok(secret_store::external()),
+                Some(key_cfg) => Ok(secret_store::backend_for(cfg, Some(key_cfg), n)),
+            };
+            (n.clone(), step)
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -206,31 +197,15 @@ async fn create_one(
     lk: &mut lock::Lock,
     client: &RbxApiKeyClient,
     name: &str,
+    resolved: &secret_store::Resolved,
     creator_id: u64,
     no_ip: bool,
-    force: bool,
     skip_verify: bool,
-    stdout: bool,
 ) -> Result<()> {
-    let key_cfg = match config::get(cfg, name) {
-        Some(k) => k,
-        None => {
-            say!("{}", super::missing_key_note(cfg, name).yellow());
-            return Ok(());
-        }
-    };
-    if lock::get(lk, name).is_some() && !force {
-        say!(
-            "{}",
-            format!(
-                "skipping \"{}\": already in {} (use --force to overwrite)",
-                name,
-                lock::FILE
-            )
-            .yellow()
-        );
-        return Ok(());
-    }
+    // `plan` skipped the keys that are not declared.
+    let key_cfg = config::get(cfg, name)
+        .ok_or_else(|| anyhow::anyhow!("\"{name}\" is not in {}", config::FILE))?;
+    let stdout = resolved.backend == secret_store::Backend::External;
 
     // Sync this key's targets into the lockfile's shared `[envs.X]` table.
     // `sync_targets` does the `rbxplace.toml` lookup and reuses cached owners
@@ -297,11 +272,7 @@ async fn create_one(
         }
     }
 
-    let resolved = if stdout {
-        secret_store::external()
-    } else {
-        secret_store::backend_for(cfg, Some(key_cfg), name)
-    };
+    // Where `plan` said, which is where the git guard looked.
     let secret_file_target = if resolved.backend == secret_store::Backend::File {
         Some(resolved.target.clone())
     } else {
@@ -319,7 +290,7 @@ async fn create_one(
         expires_at: expiration_time.clone(),
     };
 
-    if let Err(e) = secret_store::write(&resolved, &secret, &mut entry) {
+    if let Err(e) = secret_store::write(resolved, &secret, &mut entry) {
         bail!(
             "\"{}\" key created on Roblox but failed to store secret: {}\n  Roblox cloud_auth_id: {}",
             name,
@@ -369,39 +340,6 @@ async fn create_one(
     }
 
     Ok(())
-}
-
-/// The keys of a run, once git has been asked about every secret they would
-/// write; the whole run is refused, naming each refused key, if any of them
-/// would land in a file git is not ignoring.
-///
-/// Returned rather than checked on the side, so the run creates the list that
-/// was checked. Only the keys `create_one` would write for are asked about: a
-/// name the config does not declare, or a key already in the lockfile without
-/// `--force`, is skipped there. Under `--stdout` nothing reaches the disk.
-fn checked_against_git(
-    cfg: &config::Config,
-    lk: &lock::Lock,
-    names: Vec<String>,
-    force: bool,
-    stdout: bool,
-    lock_path: &Path,
-) -> Result<Vec<String>> {
-    let writes: Vec<(String, secret_store::Resolved)> = names
-        .iter()
-        .filter(|n| force || lock::get(lk, n).is_none())
-        .filter_map(|n| {
-            let key_cfg = config::get(cfg, n)?;
-            let resolved = if stdout {
-                secret_store::external()
-            } else {
-                secret_store::backend_for(cfg, Some(key_cfg), n)
-            };
-            Some((n.clone(), resolved))
-        })
-        .collect();
-    git_guard::check_all(&writes, lock_path, git_guard::Write::Create)?;
-    Ok(names)
 }
 
 /// The permissions a set of scope entries grants, as comparable triples.
@@ -543,6 +481,37 @@ mod tests {
         config::load_from(&path).unwrap()
     }
 
+    /// The run's guard, as `run` calls it: on the plan the loop then follows.
+    fn guarded(
+        cfg: &config::Config,
+        lk: &lock::Lock,
+        names: &[&str],
+        force: bool,
+        stdout: bool,
+        lock_path: &Path,
+    ) -> Result<()> {
+        let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        super::super::guard_plan(
+            &plan(cfg, lk, &names, force, stdout),
+            super::super::writes,
+            lock_path,
+            git_guard::Write::Create,
+        )
+    }
+
+    fn tracked_entry() -> lock::LockEntry {
+        lock::LockEntry {
+            cloud_auth_id: "aaaaBBBBccccDDDD".into(),
+            secret: Some("not-a-real-secret".into()),
+            secret_file: None,
+            secret_external: false,
+            creator_id: 1234567890,
+            is_enabled: true,
+            created_at: "now".into(),
+            expires_at: None,
+        }
+    }
+
     /// The lockfile: the default destination, and the one the guard covered
     /// from the start.
     #[test]
@@ -553,17 +522,43 @@ mod tests {
         let lock_path = dir.path().join(lock::FILE);
 
         let lk = lock::Lock::default();
-        let check = |names: &[&str]| {
-            let names = names.iter().map(|n| n.to_string()).collect();
-            checked_against_git(&cfg, &lk, names, false, false, &lock_path)
-        };
 
-        let err = check(&["deploy"]).unwrap_err();
+        let err = guarded(&cfg, &lk, &["deploy"], false, false, &lock_path).unwrap_err();
         assert!(
             format!("{err}").contains("Nothing has been created"),
             "{err}"
         );
-        assert_eq!(check(&["ci"]).unwrap(), vec!["ci".to_string()]);
+        guarded(&cfg, &lk, &["ci"], false, false, &lock_path).unwrap();
+    }
+
+    /// The plan the guard and the loop share: where each secret goes, or why
+    /// the key is skipped.
+    #[test]
+    fn the_plan_says_where_each_secret_goes_or_why_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = two_destinations(dir.path());
+        let mut lk = lock::Lock::default();
+        lock::set(&mut lk, "deploy", tracked_entry());
+        let names: Vec<String> = ["deploy", "ci", "nope"].map(String::from).to_vec();
+
+        let steps = plan(&cfg, &lk, &names, false, false);
+        assert!(steps[0].1.as_ref().unwrap_err().contains("already in"));
+        assert_eq!(
+            steps[1].1.as_ref().unwrap().backend,
+            secret_store::Backend::File
+        );
+        assert!(steps[2].1.is_err());
+
+        let forced = plan(&cfg, &lk, &names, true, false);
+        assert_eq!(
+            forced[0].1.as_ref().unwrap().backend,
+            secret_store::Backend::Lockfile
+        );
+        let printed = plan(&cfg, &lk, &names, true, true);
+        assert_eq!(
+            printed[1].1.as_ref().unwrap().backend,
+            secret_store::Backend::External
+        );
     }
 
     /// `--all` is refused as a whole, naming every key that was refused and
@@ -574,12 +569,10 @@ mod tests {
         let dir = git_guard::tests::repo();
         let cfg = two_destinations(dir.path());
         let lock_path = dir.path().join(lock::FILE);
-        let names = vec!["ci".to_string(), "deploy".to_string()];
-
-        let err = checked_against_git(
+        let err = guarded(
             &cfg,
             &lock::Lock::default(),
-            names,
+            &["ci", "deploy"],
             false,
             false,
             &lock_path,
@@ -600,25 +593,11 @@ mod tests {
         let cfg = two_destinations(dir.path());
         let lock_path = dir.path().join(lock::FILE);
         let mut lk = lock::Lock::default();
-        lock::set(
-            &mut lk,
-            "deploy",
-            lock::LockEntry {
-                cloud_auth_id: "aaaaBBBBccccDDDD".into(),
-                secret: Some("not-a-real-secret".into()),
-                secret_file: None,
-                secret_external: false,
-                creator_id: 1234567890,
-                is_enabled: true,
-                created_at: "now".into(),
-                expires_at: None,
-            },
-        );
-        let deploy = || vec!["deploy".to_string()];
+        lock::set(&mut lk, "deploy", tracked_entry());
 
-        checked_against_git(&cfg, &lk, deploy(), false, false, &lock_path).unwrap();
-        assert!(checked_against_git(&cfg, &lk, deploy(), true, false, &lock_path).is_err());
-        checked_against_git(&cfg, &lk, deploy(), true, true, &lock_path).unwrap();
+        guarded(&cfg, &lk, &["deploy"], false, false, &lock_path).unwrap();
+        assert!(guarded(&cfg, &lk, &["deploy"], true, false, &lock_path).is_err());
+        guarded(&cfg, &lk, &["deploy"], true, true, &lock_path).unwrap();
     }
 
     /// A `secret_file` git does not ignore, which `create` used to pass on the
@@ -632,14 +611,10 @@ mod tests {
         let lock_path = dir.path().join(lock::FILE);
 
         let lk = lock::Lock::default();
-        let check = |names: &[&str]| {
-            let names = names.iter().map(|n| n.to_string()).collect();
-            checked_against_git(&cfg, &lk, names, false, false, &lock_path)
-        };
 
-        let err = check(&["deploy", "ci"]).unwrap_err();
+        let err = guarded(&cfg, &lk, &["deploy", "ci"], false, false, &lock_path).unwrap_err();
         assert!(format!("{err}").contains("ci.env"), "{err}");
-        check(&["deploy"]).unwrap();
+        guarded(&cfg, &lk, &["deploy"], false, false, &lock_path).unwrap();
     }
 
     /// The skipped-introspect line reported "introspecting the key" and

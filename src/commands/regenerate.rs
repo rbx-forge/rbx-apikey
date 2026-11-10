@@ -35,7 +35,7 @@ pub async fn run(
 
     crate::drift::check_all(&lk, places.as_ref())?;
 
-    let requested: Vec<String> = if all {
+    let names: Vec<String> = if all {
         let mut v: Vec<String> = lk.keys.keys().cloned().collect();
         v.sort();
         if v.is_empty() {
@@ -45,13 +45,20 @@ pub async fn run(
     } else {
         vec![name.unwrap().to_string()]
     };
-    // Every key against git before the first question and the first rotation:
-    // once Roblox answers, the old secret is dead, and a refusal then would
-    // leave the new one with nowhere to go.
-    let requested = checked_against_git(&cfg, &lk, requested, stdout, Path::new(lock::FILE))?;
+    // What the run will write, decided once, and checked against git before
+    // the first question and the first rotation: once Roblox answers, the old
+    // secret is dead, and a refusal then would leave the new one with nowhere
+    // to go. The loop below writes exactly this.
+    let plan = plan(&cfg, &lk, &names, stdout);
+    super::guard_plan(
+        &plan,
+        super::writes,
+        Path::new(lock::FILE),
+        git_guard::Write::Rotate,
+    )?;
 
-    let names: Vec<String> = if all {
-        let v = requested;
+    if all {
+        let v = &names;
         say!("About to rotate {} secrets: {}", v.len(), v.join(", "));
         say!(
             "{}",
@@ -67,9 +74,8 @@ pub async fn run(
                 return Ok(());
             }
         }
-        v
     } else {
-        let single = requested.join(", ");
+        let single = names.join(", ");
         // Single-key rotation: confirm once unless --yes. The --all path above
         // has its own explicit "Proceed?" prompt because it lists every key.
         //
@@ -88,8 +94,7 @@ pub async fn run(
             ),
             skip_confirm,
         )?;
-        requested
-    };
+    }
 
     // Before the first rotation. Rotating invalidates the old secret the
     // moment it lands, so a run that gets through two keys and is then refused
@@ -99,20 +104,25 @@ pub async fn run(
 
     // No save after each key: `regenerate_one` writes the lockfile itself, as
     // soon as the new secret is in it and before it asks anything.
-    let mut outcomes = Vec::with_capacity(names.len());
-    for n in &names {
-        outcomes.push(
-            regenerate_one(
-                &cfg,
-                &mut lk,
-                &client,
-                n,
-                clean_files,
-                stdout,
-                Path::new(lock::FILE),
-            )
-            .await,
-        );
+    let mut outcomes = Vec::with_capacity(plan.len());
+    for (n, step) in &plan {
+        outcomes.push(match step {
+            Err(note) => {
+                say!("{}", note.yellow());
+                Rotation::Untouched
+            }
+            Ok(resolved) => {
+                regenerate_one(
+                    &mut lk,
+                    &client,
+                    n,
+                    resolved,
+                    clean_files,
+                    Path::new(lock::FILE),
+                )
+                .await
+            }
+        });
     }
 
     let invalidated = outcomes.iter().filter(|o| o.invalidated_the_old()).count();
@@ -151,35 +161,28 @@ pub async fn run(
     Ok(())
 }
 
-/// The keys of a run, once git has been asked about every secret they would
-/// write; the whole run is refused, naming each refused key, if any of them
-/// would land in a file git is not ignoring.
-///
-/// Returned rather than checked on the side, so the run rotates the list that
-/// was checked. A key with no lockfile entry is skipped by `regenerate_one`,
-/// and a secret printed with `--stdout` reaches no file, so neither is asked
-/// about.
-fn checked_against_git(
+/// Each key of the run and where its new secret goes, or why it is skipped:
+/// a key the lockfile does not track has nothing to rotate. Under `--stdout`
+/// the secret goes nowhere on disk.
+fn plan(
     cfg: &config::Config,
     lk: &lock::Lock,
-    names: Vec<String>,
+    names: &[String],
     stdout: bool,
-    lock_path: &Path,
-) -> Result<Vec<String>> {
-    let writes: Vec<(String, secret_store::Resolved)> = names
+) -> super::Plan<secret_store::Resolved> {
+    names
         .iter()
-        .filter(|n| lock::get(lk, n).is_some())
         .map(|n| {
-            let resolved = if stdout {
-                secret_store::external()
+            let step = if lock::get(lk, n).is_none() {
+                Err(format!("skipping \"{}\": not in {}", n, lock::FILE))
+            } else if stdout {
+                Ok(secret_store::external())
             } else {
-                secret_store::backend_for(cfg, config::get(cfg, n), n)
+                Ok(secret_store::backend_for(cfg, config::get(cfg, n), n))
             };
-            (n.clone(), resolved)
+            (n.clone(), step)
         })
-        .collect();
-    git_guard::check_all(&writes, lock_path, git_guard::Write::Rotate)?;
-    Ok(names)
+        .collect()
 }
 
 /// What one key's rotation did.
@@ -213,41 +216,32 @@ impl Rotation {
     }
 }
 
+/// Rotate one key and store its new secret at `new_resolved`, the destination
+/// the run planned and the git guard checked.
 async fn regenerate_one(
-    cfg: &config::Config,
     lk: &mut lock::Lock,
     client: &crate::api::RbxApiKeyClient,
     name: &str,
+    new_resolved: &secret_store::Resolved,
     clean_files: bool,
-    stdout: bool,
     lock_path: &Path,
 ) -> Rotation {
-    let entry = match lock::get(lk, name).cloned() {
-        Some(e) => e,
-        None => {
-            say!(
-                "{}",
-                format!("skipping \"{}\": not in {}", name, lock::FILE).yellow()
-            );
-            return Rotation::Untouched;
-        }
+    // `plan` skipped the keys the lockfile does not track.
+    let Some(entry) = lock::get(lk, name).cloned() else {
+        say!(
+            "{}",
+            format!("skipping \"{}\": not in {}", name, lock::FILE).yellow()
+        );
+        return Rotation::Untouched;
     };
-
-    let key_cfg = config::get(cfg, name);
+    let stdout = new_resolved.backend == secret_store::Backend::External;
 
     // Where the OLD (now-invalidated) secret was stored, vs. where the NEW one belongs.
     // After a successful rotate, the OLD location holds garbage; we offer to clean it up
     // when `secret_file` was changed in rbxapikey.toml between writes.
     let previous_resolved = secret_store::previous_backend_from_entry(&entry, name);
-    let new_resolved = if stdout {
-        secret_store::external()
-    } else {
-        secret_store::backend_for(cfg, key_cfg, name)
-    };
-    let backend_changed = secret_store::backend_differs(&previous_resolved, &new_resolved);
+    let backend_changed = secret_store::backend_differs(&previous_resolved, new_resolved);
 
-    // Where `new_resolved` points was checked against git by `run`, before the
-    // first prompt: see `checked_against_git`.
     say!("Regenerating \"{}\" (id={})...", name, entry.cloud_auth_id);
     let resp = match client.regenerate_secret(&entry.cloud_auth_id).await {
         Ok(r) => r,
@@ -279,7 +273,7 @@ async fn regenerate_one(
     }
 
     let mut entry = entry;
-    if let Err(e) = secret_store::write(&new_resolved, &new_secret, &mut entry) {
+    if let Err(e) = secret_store::write(new_resolved, &new_secret, &mut entry) {
         say!(
             "{}",
             format!(
@@ -419,6 +413,11 @@ mod tests {
         (client, server)
     }
 
+    /// The destination `plan` gives a key in the lockfile with no secret file.
+    fn into_the_lockfile() -> secret_store::Resolved {
+        secret_store::backend_for(&config::Config::default(), None, "deploy")
+    }
+
     /// The old secret died when Roblox answered, and Roblox will not show the
     /// new one again. It has to be on disk by the time `regenerate_one`
     /// returns, with no save after it: the caller used to do that save, after
@@ -432,12 +431,11 @@ mod tests {
         let (client, _server) = rotating("regenerate-stored").await;
 
         let outcome = regenerate_one(
-            &config::Config::default(),
             &mut lk,
             &client,
             "deploy",
+            &into_the_lockfile(),
             true,
-            false,
             &lock_path,
         )
         .await;
@@ -462,12 +460,11 @@ mod tests {
         let (client, _server) = rotating("regenerate-unsaved").await;
 
         let outcome = regenerate_one(
-            &config::Config::default(),
             &mut lk,
             &client,
             "deploy",
+            &into_the_lockfile(),
             true,
-            false,
             &lock_path,
         )
         .await;
@@ -501,6 +498,47 @@ mod tests {
         n.iter().map(|s| s.to_string()).collect()
     }
 
+    /// The run's guard, as `run` calls it: on the plan the loop then follows.
+    fn guarded(
+        cfg: &config::Config,
+        lk: &lock::Lock,
+        names: Vec<String>,
+        stdout: bool,
+        lock_path: &Path,
+    ) -> Result<()> {
+        super::super::guard_plan(
+            &plan(cfg, lk, &names, stdout),
+            super::super::writes,
+            lock_path,
+            git_guard::Write::Rotate,
+        )
+    }
+
+    /// The plan skips a key the lockfile does not track, and sends a printed
+    /// secret nowhere on disk.
+    #[test]
+    fn the_plan_says_where_each_secret_goes_or_why_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, lk) = two_keys(dir.path());
+
+        let steps = plan(&cfg, &lk, &names(&["ci", "deploy", "nope"]), false);
+        assert_eq!(
+            steps[0].1.as_ref().unwrap().backend,
+            secret_store::Backend::File
+        );
+        assert_eq!(
+            steps[1].1.as_ref().unwrap().backend,
+            secret_store::Backend::Lockfile
+        );
+        assert!(steps[2].1.as_ref().unwrap_err().contains("not in"));
+
+        let printed = plan(&cfg, &lk, &names(&["ci"]), true);
+        assert_eq!(
+            printed[0].1.as_ref().unwrap().backend,
+            secret_store::Backend::External
+        );
+    }
+
     /// The lockfile is where the rotated secret would go, and git does not
     /// ignore it. The run stops before its first question: once Roblox
     /// answers, the old secret is dead, and refusing then would leave the new
@@ -512,15 +550,14 @@ mod tests {
         let (cfg, lk) = two_keys(dir.path());
         let lock_path = dir.path().join(lock::FILE);
 
-        let err =
-            checked_against_git(&cfg, &lk, names(&["deploy"]), false, &lock_path).unwrap_err();
+        let err = guarded(&cfg, &lk, names(&["deploy"]), false, &lock_path).unwrap_err();
         assert!(
             format!("{err}").contains("Nothing has been rotated"),
             "{err}"
         );
-        checked_against_git(&cfg, &lk, names(&["ci"]), false, &lock_path).unwrap();
+        guarded(&cfg, &lk, names(&["ci"]), false, &lock_path).unwrap();
         // `--stdout` writes nothing to refuse.
-        checked_against_git(&cfg, &lk, names(&["deploy"]), true, &lock_path).unwrap();
+        guarded(&cfg, &lk, names(&["deploy"]), true, &lock_path).unwrap();
     }
 
     /// The same for a `secret_file`, with the lockfile itself ignored: the
@@ -532,9 +569,9 @@ mod tests {
         let (cfg, lk) = two_keys(dir.path());
         let lock_path = dir.path().join(lock::FILE);
 
-        let err = checked_against_git(&cfg, &lk, names(&["ci"]), false, &lock_path).unwrap_err();
+        let err = guarded(&cfg, &lk, names(&["ci"]), false, &lock_path).unwrap_err();
         assert!(format!("{err}").contains("ci.env"), "{err}");
-        checked_against_git(&cfg, &lk, names(&["deploy"]), false, &lock_path).unwrap();
+        guarded(&cfg, &lk, names(&["deploy"]), false, &lock_path).unwrap();
     }
 
     /// `--all` is refused as a whole, naming every refused key, before the
@@ -545,8 +582,7 @@ mod tests {
         let (cfg, lk) = two_keys(dir.path());
         let lock_path = dir.path().join(lock::FILE);
 
-        let err = checked_against_git(&cfg, &lk, names(&["ci", "deploy"]), false, &lock_path)
-            .unwrap_err();
+        let err = guarded(&cfg, &lk, names(&["ci", "deploy"]), false, &lock_path).unwrap_err();
 
         let text = format!("{err}");
         assert!(text.contains("(deploy)"), "{text}");
