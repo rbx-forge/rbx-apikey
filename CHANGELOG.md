@@ -2,8 +2,11 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-10
+
 ### Fixed
 
+- A write of the lockfile or a secret file that fails leaves no empty file behind, and says when it could not put the old content back. A file a scanner holds for a moment is written once it lets go.
 - `regenerate` and `update` refuse to write a secret into a file git does not ignore, as `create` does, and all three check a `secret_file` as well as the lockfile. `create` checked only the lockfile, and `regenerate` and `update` checked nothing. Every key of the run is checked before the first question and before Roblox is asked, and one refused key refuses the whole run with a message naming every refused file and its keys, so nothing has been created, rotated or moved when it stops.
 - The git guard answers through a symlink or a junction: git was handed the linked path, called it outside the repository, and the check read as one that could not run, so the secret was written with a warning. It tells a file git already tracks from one it does not ignore, since an ignore line does not untrack a file, and says to run `git rm --cached` for it. The line it suggests is the file's path from the repository root, anchored with `/`: it copied the config's path, which matched nothing for `./.secrets/`, was not a pattern for `../x/`, and anchored elsewhere when run from a subdirectory. A relative secret file path is checked where it is, and a `.git` that cannot be looked at gives a warning instead of passing as "not a repository".
 - An `rbxplace.toml`, an `rbxapikey.toml` or a lockfile that is there and cannot be looked at stops the command, naming the file. Each read as absent somewhere: the env file switched the drift check off without a word, the config was reported missing with advice to create it, and `list --remote` and `doctor` showed every key of the project as untracked. `doctor` reports a config or lockfile it cannot look at, read or parse as a finding naming the file, and goes on with what does not depend on it, such as the key in `RBX_API_KEY`; it used to report a directory declaring no keys.
