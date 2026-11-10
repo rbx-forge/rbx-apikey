@@ -682,13 +682,27 @@ async fn probe_section(
         ));
         return s;
     };
-    let Some((universe_id, how)) = probe_target(global) else {
-        s.push(Line::skipped(
-            "authenticated read",
-            "no universe to read. Pass --env <name> or --universe-id <id>, or add an env to \
-             rbxplace.toml.",
-        ));
-        return s;
+    let (universe_id, how) = match probe_target(global) {
+        Ok(Some(target)) => target,
+        Ok(None) => {
+            s.push(Line::skipped(
+                "authenticated read",
+                "no universe to read. Pass --env <name> or --universe-id <id>, or add an env \
+                 to rbxplace.toml.",
+            ));
+            return s;
+        }
+        // Not "no universe to read": there is an env file, and the reader
+        // needs to hear that it is the env file that is broken.
+        Err(why) => {
+            s.push(Line::fail(
+                "authenticated read",
+                format!("no universe to read: {why}"),
+                "Every command that reads this file stops on it too. Fix it, or name the \
+                 universe with --universe-id <id>.",
+            ));
+            return s;
+        }
     };
 
     // Stated before the result: a reader who disagrees with the target needs to
@@ -746,25 +760,39 @@ async fn probe_section(
 /// there, but `doctor` is being asked what is wrong, and "I did not check
 /// because you did not say which of your one envs to use" is not an answer.
 /// Which env was picked is printed either way.
-fn probe_target(global: &GlobalFlags) -> Option<(u64, String)> {
+///
+/// `Ok(None)` when there is nothing to pick from: no explicit universe and no
+/// `rbxplace.toml`, or one with several envs. An env file that is there and
+/// cannot be looked at or parsed is an `Err` naming it, because "no universe
+/// to read" would send the reader to add an env to a file that has one.
+fn probe_target(global: &GlobalFlags) -> Result<Option<(u64, String)>, String> {
     if let Ok(universe_id) = global.single_universe() {
         let how = match global.env.as_deref() {
             Some(env) => format!("--env {env}"),
             None => "--universe-id".to_string(),
         };
-        return Some((universe_id, how));
+        return Ok(Some((universe_id, how)));
     }
 
-    let places = PlacesFile::load(&global.places).ok()?;
+    let path = &global.places;
+    match path.try_exists() {
+        Ok(true) => {}
+        Ok(false) => return Ok(None),
+        Err(e) => return Err(format!("{} cannot be looked at: {e}", path.display())),
+    }
+    let places = PlacesFile::load(path)
+        .map_err(|e| format!("{} could not be read: {e:#}", path.display()))?;
     let names = places.env_names();
     let [only] = names.as_slice() else {
-        return None;
+        return Ok(None);
     };
-    let env = places.get(only).ok()?;
-    Some((
+    let env = places
+        .get(only)
+        .map_err(|e| format!("{} could not be read: {e:#}", path.display()))?;
+    Ok(Some((
         env.universe_id,
-        format!("the only env in {}", global.places.display()),
-    ))
+        format!("the only env in {}", path.display()),
+    )))
 }
 
 #[cfg(test)]
@@ -1364,16 +1392,62 @@ mod tests {
     fn the_probe_target_prefers_an_explicit_universe_id() {
         let mut global = flags();
         global.universe_id = Some(4242);
-        let (universe_id, how) = probe_target(&global).unwrap();
+        let (universe_id, how) = probe_target(&global).unwrap().unwrap();
         assert_eq!(universe_id, 4242);
         assert!(how.contains("--universe-id"));
+    }
+
+    /// A broken or unreadable `rbxplace.toml` is named with its error, and
+    /// never read as "no universe to read", which sent the reader to add an
+    /// env to a file that has one.
+    #[test]
+    fn a_broken_env_file_is_named_rather_than_read_as_no_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut global = flags();
+
+        global.places = dir.path().join("rbxplace.toml");
+        std::fs::write(&global.places, "this is = = not toml").unwrap();
+        let why = probe_target(&global).expect_err("a file that does not parse");
+        assert!(why.contains("rbxplace.toml"), "{why}");
+
+        global.places = crate::test_support::unlookable(dir.path());
+        let why = probe_target(&global).expect_err("a file that cannot be looked at");
+        assert!(why.contains("cannot be looked at"), "{why}");
+    }
+
+    /// And the section says so as a failure, with the file and the error,
+    /// instead of the skip that suggests adding an env.
+    #[tokio::test]
+    async fn the_probe_section_names_a_broken_env_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut global = flags();
+        global.places = dir.path().join("rbxplace.toml");
+        std::fs::write(&global.places, "this is = = not toml").unwrap();
+        let cli = DoctorCli {
+            key: None,
+            no_probe: false,
+            check_ip: false,
+        };
+        let active = Some(ActiveKey {
+            secret: "not-a-real-secret".into(),
+            origin: KeyOrigin::EnvVar,
+        });
+        // Port 1: nothing may be asked, and nothing must reach Roblox if it is.
+        let probe = probe::Probe::default().with_base_url("http://127.0.0.1:1");
+
+        let section = probe_section(&cli, &global, &active, &probe).await;
+
+        let line = &section.lines[0];
+        assert_eq!(line.status, report::Status::Fail);
+        assert!(line.detail.contains("rbxplace.toml"), "{}", line.detail);
+        assert!(!line.detail.contains("add an env"), "{}", line.detail);
     }
 
     #[test]
     fn there_is_no_probe_target_without_a_places_file() {
         let mut global = flags();
         global.places = "definitely/not/here.toml".into();
-        assert!(probe_target(&global).is_none());
+        assert!(probe_target(&global).unwrap().is_none());
     }
 
     /// Step 5 against a real HTTP exchange.
