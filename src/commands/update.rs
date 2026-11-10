@@ -8,7 +8,7 @@ use dialoguer::Confirm;
 
 use crate::api::api_keys::ConfigProperties;
 use crate::api::RbxApiKeyClient;
-use crate::{config, lock, owner_resolver, scope_builder, secret_store};
+use crate::{config, git_guard, lock, owner_resolver, scope_builder, secret_store};
 use rbx_core::confirm::confirm_always;
 use rbx_core::places::PlacesFile;
 use rbx_core::GlobalFlags;
@@ -135,6 +135,10 @@ async fn update_one(
         !held_elsewhere && secret_store::backend_differs(&previous_resolved, &new_resolved);
 
     if needs_migration {
+        // Before the move and before Roblox is asked: a refusal here leaves the
+        // secret where it was and the key as it was.
+        git_guard::check(&new_resolved, lock_path, git_guard::Write::Move)
+            .map_err(|e| anyhow::anyhow!("\"{name}\": {e}"))?;
         let secret = secret_store::read(&previous_resolved, Some(&entry)).ok_or_else(|| {
             anyhow::anyhow!(
                 "\"{}\": cannot migrate secret, not found at previous location ({}: {}). Run `rbx-apikey regenerate {}` after updating to create a fresh secret at the new location.",
@@ -347,6 +351,94 @@ scopes = ["universe:read"]
             created_at: "now".into(),
             expires_at: None,
         }
+    }
+
+    /// A server that answers nothing, to show nothing was asked of it.
+    async fn silent() -> (RbxApiKeyClient, MockServer) {
+        let server = MockServer::start().await;
+        let client = RbxApiKeyClient::new(Some("update-guard".to_string()))
+            .with_base_url(server.uri())
+            .with_users_base_url(server.uri());
+        (client, server)
+    }
+
+    fn config_in(dir: &Path, key: &str) -> config::Config {
+        let path = dir.join(config::FILE);
+        std::fs::write(
+            &path,
+            format!("[settings]\ndefault_allowed_cidrs = [\"203.0.113.0/24\"]\n\n{key}"),
+        )
+        .unwrap();
+        config::load_from(&path).unwrap()
+    }
+
+    /// `secret_file` was added to a key whose secret is in the lockfile, and
+    /// git does not ignore the new file. The move is refused before it
+    /// happens and before Roblox hears of the update.
+    #[tokio::test]
+    async fn a_move_to_a_secret_file_git_does_not_ignore_is_refused() {
+        let dir = git_guard::tests::repo();
+        std::fs::write(dir.path().join(".gitignore"), "rbxapikey.lock.toml\n").unwrap();
+        let secret_file = dir.path().join(".secrets").join("first.env");
+        let cfg = config_in(
+            dir.path(),
+            &format!(
+                "[keys.first]\nscopes = [\"universe:read\"]\nsecret_file = '{}'\n",
+                secret_file.display()
+            ),
+        );
+        let lock_path = dir.path().join(lock::FILE);
+        let mut lk = lock::Lock::default();
+        lock::set(&mut lk, "first", entry("id-first"));
+        lock::save_to(&lk, &lock_path).unwrap();
+        let (client, server) = silent().await;
+
+        let err = update_one(
+            &cfg, None, &mut lk, &client, "first", false, false, true, &lock_path,
+        )
+        .await
+        .expect_err("the move is refused");
+
+        assert!(format!("{err}").contains("first.env"), "{err}");
+        assert!(server.received_requests().await.unwrap().is_empty());
+        assert!(!secret_file.try_exists().unwrap(), "nothing was written");
+        let on_disk = lock::load_from(&lock_path).unwrap();
+        assert_eq!(
+            lock::get(&on_disk, "first").unwrap().secret.as_deref(),
+            Some("not-a-real-secret")
+        );
+    }
+
+    /// The other direction: `secret_file` was dropped, so the secret would
+    /// move into a lockfile git does not ignore.
+    #[tokio::test]
+    async fn a_move_into_a_lockfile_git_does_not_ignore_is_refused() {
+        let dir = git_guard::tests::repo();
+        std::fs::write(dir.path().join(".gitignore"), ".secrets/\n").unwrap();
+        let old_file = dir.path().join(".secrets").join("first.env");
+        std::fs::create_dir_all(old_file.parent().unwrap()).unwrap();
+        std::fs::write(&old_file, "not-a-real-secret").unwrap();
+        let cfg = config_in(dir.path(), "[keys.first]\nscopes = [\"universe:read\"]\n");
+        let lock_path = dir.path().join(lock::FILE);
+        let mut lk = lock::Lock::default();
+        let mut moved = entry("id-first");
+        moved.secret = None;
+        moved.secret_file = Some(old_file.to_string_lossy().to_string());
+        lock::set(&mut lk, "first", moved);
+        let (client, server) = silent().await;
+
+        let err = update_one(
+            &cfg, None, &mut lk, &client, "first", false, false, true, &lock_path,
+        )
+        .await
+        .expect_err("the move is refused");
+
+        assert!(format!("{err}").contains(lock::FILE), "{err}");
+        assert!(server.received_requests().await.unwrap().is_empty());
+        assert!(
+            lock::get(&lk, "first").unwrap().secret.is_none(),
+            "the secret did not move into the lockfile"
+        );
     }
 
     /// `--all` walks the keys one at a time. Roblox takes the first update and

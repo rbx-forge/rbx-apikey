@@ -8,7 +8,7 @@ Every command except `scopes` authenticates with a [session cookie](reference/au
 
 `rbx-apikey create <key> | --all`
 
-Create the key on Roblox and store its secret. Refuses if the secret would land in a file git tracks.
+Create the key on Roblox and store its secret. Refuses, before creating anything, if a secret would land in a file git does not ignore.
 
 | Flag | Meaning |
 | --- | --- |
@@ -25,7 +25,7 @@ A failed creation that Roblox reports as `500` prints the scopes it sent: a scop
 
 `rbx-apikey update <key> | --all`
 
-Apply the file to existing keys: enabled, expiry, IP ranges, scopes.
+Apply the file to existing keys: enabled, expiry, IP ranges, scopes. If `secret_file` changed, the secret moves to the new location first; a new location git does not ignore stops the key before Roblox is asked.
 
 | Flag | Meaning |
 | --- | --- |
@@ -37,7 +37,7 @@ Apply the file to existing keys: enabled, expiry, IP ranges, scopes.
 
 `rbx-apikey regenerate <key> | --all`
 
-New secret, old one invalid. `--clean-files`, `--yes`, and `--stdout` as for `create`.
+New secret, old one invalid. `--clean-files`, `--yes`, and `--stdout` as for `create`. A key whose new secret would land in a file git does not ignore is not rotated, and keeps the secret it has.
 
 ### rbx-apikey delete
 

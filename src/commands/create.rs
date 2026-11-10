@@ -9,7 +9,7 @@ use dialoguer::MultiSelect;
 
 use crate::api::api_keys::{ConfigProperties, CreateApiKeyResponse};
 use crate::api::RbxApiKeyClient;
-use crate::git_guard::{self, GitStatus};
+use crate::git_guard;
 use crate::scope_builder::ScopeDef;
 use crate::{config, lock, owner_resolver, scope_builder, secret_store, time_iso};
 use rbx_core::places::PlacesFile;
@@ -66,8 +66,13 @@ pub async fn run(
     // ship. Checked here rather than at write time, because refusing after
     // creation leaves a live key whose secret was never stored. Under
     // `--stdout` nothing secret reaches the disk, so there is nothing to guard.
-    if !stdout {
-        refuse_if_the_secret_would_be_committed(&cfg)?;
+    // The picker below checks what it picked, once it knows.
+    if !stdout && (all || name.is_some()) {
+        let names: Vec<String> = match name {
+            Some(n) => vec![n.to_string()],
+            None => cfg.keys.keys().cloned().collect(),
+        };
+        refuse_if_a_secret_would_be_committed(&cfg, &names, Path::new(lock::FILE))?;
     }
     let mut lk = lock::load()?;
     let places = super::load_places(global)?;
@@ -103,6 +108,7 @@ pub async fn run(
             .into_iter()
             .map(|i| candidates[i].clone())
             .collect();
+        refuse_if_a_secret_would_be_committed(&cfg, &chosen, Path::new(lock::FILE))?;
 
         if no_ip {
             say!("{}", "--no-ip: keys accept calls from any IP".yellow());
@@ -364,34 +370,34 @@ async fn create_one(
     Ok(())
 }
 
-/// Stop before creating anything if the secret's destination is a file git is
-/// not ignoring.
+/// Stop before creating anything if any of these keys' secrets would land in
+/// a file git is not ignoring.
 ///
-/// Only the lockfile backend is checked here. A `secret_file` path is the
-/// user's own choice of location, and `.secrets/` is gitignored in every
-/// example this project ships; the lockfile is the **default**, so it is the
-/// one somebody arrives at without choosing it.
-fn refuse_if_the_secret_would_be_committed(cfg: &config::Config) -> Result<()> {
-    // A config whose default backend is a file never touches the lockfile for
-    // secrets, so there is nothing to guard.
-    if cfg.settings.default_secret_file.is_some() {
-        return Ok(());
-    }
-
-    let path = Path::new(lock::FILE);
-    match git_guard::status_of(path) {
-        GitStatus::NotARepo | GitStatus::Ignored => Ok(()),
-        GitStatus::Tracked => bail!(git_guard::refusal(path)),
-        // An unanswerable check is not a verdict: git missing from PATH is not
-        // evidence that the file is safe, nor that it is not.
-        GitStatus::Unknown(why) => {
-            eprintln!(
-                "warning: could not check whether {} is gitignored ({why});                  the key secret is stored there in plain text",
-                path.display()
-            );
-            Ok(())
+/// Every key's own destination, the lockfile or its `secret_file`, and all of
+/// them before the first key is created: under `--all`, a refusal on the third
+/// key after two were created would be a run half done for a reason known
+/// from the start. Each file is checked once, however many keys share it.
+fn refuse_if_a_secret_would_be_committed(
+    cfg: &config::Config,
+    names: &[String],
+    lock_path: &Path,
+) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for name in names {
+        // A name the config does not declare is skipped by `create_one`, so
+        // nothing would be written for it.
+        let Some(key_cfg) = config::get(cfg, name) else {
+            continue;
+        };
+        let resolved = secret_store::backend_for(cfg, Some(key_cfg), name);
+        let Some(path) = git_guard::destination(&resolved, lock_path) else {
+            continue;
+        };
+        if seen.insert(path) {
+            git_guard::check(&resolved, lock_path, git_guard::Write::Create)?;
         }
     }
+    Ok(())
 }
 
 /// The permissions a set of scope entries grants, as comparable triples.
@@ -514,6 +520,61 @@ mod tests {
             target_parts: targets.iter().map(|s| s.to_string()).collect(),
             operations: ops.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    /// A config in `dir` declaring `deploy` with its secret in the lockfile
+    /// and `ci` with its secret in `.secrets/ci.env`, both inside `dir`.
+    fn two_destinations(dir: &Path) -> config::Config {
+        let path = dir.join(config::FILE);
+        let secret_file = dir.join(".secrets").join("ci.env");
+        std::fs::write(
+            &path,
+            format!(
+                "[keys.deploy]\nscopes = [\"universe:read\"]\n\n\
+                 [keys.ci]\nscopes = [\"universe:read\"]\nsecret_file = '{}'\n",
+                secret_file.display()
+            ),
+        )
+        .unwrap();
+        config::load_from(&path).unwrap()
+    }
+
+    /// The lockfile: the default destination, and the one the guard covered
+    /// from the start.
+    #[test]
+    fn a_lockfile_git_does_not_ignore_stops_create() {
+        let dir = git_guard::tests::repo();
+        std::fs::write(dir.path().join(".gitignore"), ".secrets/\n").unwrap();
+        let cfg = two_destinations(dir.path());
+        let lock_path = dir.path().join(lock::FILE);
+
+        let err = refuse_if_a_secret_would_be_committed(&cfg, &["deploy".into()], &lock_path)
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("Nothing has been created"),
+            "{err}"
+        );
+        refuse_if_a_secret_would_be_committed(&cfg, &["ci".into()], &lock_path).unwrap();
+    }
+
+    /// A `secret_file` git does not ignore, which `create` used to pass on the
+    /// grounds that the path was the user's choice. The docs told the reader
+    /// to gitignore `.secrets/` because `create` would refuse otherwise.
+    #[test]
+    fn a_secret_file_git_does_not_ignore_stops_create() {
+        let dir = git_guard::tests::repo();
+        std::fs::write(dir.path().join(".gitignore"), "rbxapikey.lock.toml\n").unwrap();
+        let cfg = two_destinations(dir.path());
+        let lock_path = dir.path().join(lock::FILE);
+
+        let err = refuse_if_a_secret_would_be_committed(
+            &cfg,
+            &["deploy".into(), "ci".into()],
+            &lock_path,
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("ci.env"), "{err}");
+        refuse_if_a_secret_would_be_committed(&cfg, &["deploy".into()], &lock_path).unwrap();
     }
 
     /// The skipped-introspect line reported "introspecting the key" and
