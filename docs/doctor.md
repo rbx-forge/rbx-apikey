@@ -34,6 +34,8 @@ Scope coverage
 
 Read probe
   ✓ authenticated read  200: read "My Game"
+  · scopes              not tested: Roblox answers this read without universe:read, so a 200
+                        shows the key is accepted, not what it may do
 
 1 problem(s) found.
 ```
@@ -54,10 +56,10 @@ Exits `1` if a check failed, `0` otherwise. The summary counts checks that could
 2. **Key validity.** The loaded secret is matched against the account's keys by Roblox's secret preview, then enabled and expiry are reported (a warning under two weeks). Needs the cookie.
 3. **IP allowlist.** The stored ranges are always printed: a stale one fails as an opaque `401`, like a wrong key. With `--check-ip`, one request to `https://api.ipify.org` learns this machine's address and compares. An unanswered lookup, or an address family the list lacks, is reported as not checked, never as a mismatch.
 4. **Scope coverage.** For each of `rbxplace.toml`, `rbxmeta.toml`, `rbxconfig.toml`, `rbxrtbf.toml` and `rbxshop.toml` present, whether the key has the scopes that tool's operations need. Based on the file being present, not its content, and on scope type and operation, not target.
-5. **Read probe.** One `GET /cloud/v2/universes/{id}`, needing `universe:read`.
+5. **Read probe.** One `GET /cloud/v2/universes/{id}`. It shows the key is accepted (right secret, inside the allowlist, enabled), not what it may do: Roblox answers this read without `universe:read`, and GET place without `universe.place:read`, so no read can verify those two scopes. Scope coverage (step 4) is read from the key's stored configuration instead.
 
 | Probe status | Means |
 | --- | --- |
 | 401 | Wrong secret, **or** this machine is outside the IP allowlist (identical failures; `--check-ip` tells them apart) |
-| 403 | Valid key, missing scope or target |
+| 403 | Key accepted, read refused; not a missing scope. Check the universe is one the key's owner can open |
 | 404 | Universe does not exist, or the key's owner cannot see it |

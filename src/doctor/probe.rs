@@ -7,9 +7,18 @@
 //! entry fails as an opaque 401, so it is the first thing to check when a call
 //! that should work does not.
 //!
-//! `GET /cloud/v2/universes/{id}` is the probe: one scope (`universe:read`),
-//! no side effects, no cost, and it is the request a metadata sync opens with,
-//! so a failure here is a failure the user was going to hit anyway.
+//! `GET /cloud/v2/universes/{id}` is the probe: no side effects, no cost, and
+//! it is the request a metadata sync opens with, so a failure here is a
+//! failure the user was going to hit anyway.
+//!
+//! # What it does not prove
+//!
+//! Scopes. The endpoint is documented as needing `universe:read`, and Roblox
+//! does not check it: GET universe and GET place answer a key that lacks
+//! `universe:read` or `universe.place:read` (measured on 2026-11-10). So a 200
+//! says the secret, the allowlist and the key's state are fine, and nothing
+//! about what the key may do, and a 403 here is not a missing scope. No read
+//! can verify those two scopes, and the probe does not claim to.
 
 use rbx_core::api::{build_client, roblox_message, ApiBase};
 use reqwest::StatusCode;
@@ -125,10 +134,14 @@ pub fn explain(status: StatusCode) -> &'static str {
              machine's public address, and reload the key with \
              `export RBX_API_KEY=\"$(rbx-apikey resolve <name>)\"`."
         }
+        // Not a missing scope: Roblox answers this read without
+        // `universe:read`, so sending the reader to widen the key would be
+        // advice the probe cannot back. See the module documentation.
         StatusCode::FORBIDDEN => {
-            "403 means the key is valid but not allowed to make this call: a missing scope, \
-             or a scope whose target does not cover this universe. Compare the scope coverage \
-             above, then widen the key in rbxapikey.toml and `rbx-apikey update <key>`."
+            "403 means Roblox accepted the key and refused this read. It is not a missing \
+             universe:read: Roblox answers this read without that scope. Check that the \
+             universe id is one the key's owner, the account or group that created it, can \
+             open."
         }
         StatusCode::NOT_FOUND => {
             "404 means the universe id does not exist, or the key's owner cannot see it. \
@@ -196,7 +209,9 @@ mod tests {
         let forbidden = explain(StatusCode::FORBIDDEN);
         assert_ne!(unauthorized, forbidden);
         assert!(unauthorized.contains("IP allowlist"));
-        assert!(forbidden.contains("scope"));
+        // A 403 on this read is not a missing scope, since Roblox does not
+        // check one here, and must not be read as one.
+        assert!(forbidden.contains("not a missing universe:read"));
         // 401 has two causes and naming only one sends people the wrong way.
         assert!(unauthorized.contains("secret is wrong"));
     }
@@ -267,13 +282,13 @@ mod tests {
         async fn a_403_is_refused_with_robloxs_own_message() {
             let server = answering(
                 403,
-                r#"{"code":"PERMISSION_DENIED","message":"missing scope universe:read"}"#,
+                r#"{"code":"PERMISSION_DENIED","message":"Insufficient permissions"}"#,
             )
             .await;
             match probe(&server).await {
                 ProbeOutcome::Refused { status, message } => {
                     assert_eq!(status, StatusCode::FORBIDDEN);
-                    assert_eq!(message, "missing scope universe:read");
+                    assert_eq!(message, "Insufficient permissions");
                 }
                 other => panic!("expected Refused, got {other:?}"),
             }
