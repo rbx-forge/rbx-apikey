@@ -195,14 +195,26 @@ fn credentials_section(
                     key_names(declared)
                 ),
             )),
-            Some(name) => s.push(Line::fail(
-                "API key",
-                format!("\"{name}\" has no readable secret"),
-                format!(
-                    "The key is declared but its secret is not on this machine. Create it \
-                     with `rbx-apikey create {name}`, or pull the secret file it points at."
-                ),
-            )),
+            Some(name) => match declared
+                .iter()
+                .find(|k| k.name == name)
+                .and_then(|k| k.secret_error.as_deref())
+            {
+                Some(why) => s.push(Line::fail(
+                    "API key",
+                    format!("\"{name}\"'s secret cannot be read: {why}"),
+                    "The secret is stored, and this account cannot read it. Check who may \
+                     read the file named above; nothing needs recreating.",
+                )),
+                None => s.push(Line::fail(
+                    "API key",
+                    format!("\"{name}\" has no readable secret"),
+                    format!(
+                        "The key is declared but its secret is not on this machine. Create it \
+                         with `rbx-apikey create {name}`, or pull the secret file it points at."
+                    ),
+                )),
+            },
             None if declared.is_empty() => s.push(Line::fail(
                 "API key",
                 "none loaded, and this directory declares none",
@@ -249,6 +261,28 @@ fn credentials_section(
         ));
     } else {
         s.push(Line::info("rbxapikey.toml", "not in this directory"));
+    }
+
+    // A secret file that cannot be read is a finding on its key, and the
+    // diagnosis goes on: it says nothing about the key actually loaded. The
+    // key asked for with --key already failed above with the same reason.
+    for key in declared {
+        let Some(why) = key.secret_error.as_deref() else {
+            continue;
+        };
+        if requested_key == Some(key.name.as_str()) {
+            continue;
+        }
+        s.push(
+            Line::warn(
+                format!("\"{}\" secret", key.name),
+                format!("cannot be read: {why}"),
+            )
+            .with_action(
+                "Commands that use this key's secret stop on it. Check who may read the file \
+                 named above.",
+            ),
+        );
     }
 
     s
@@ -743,7 +777,61 @@ mod tests {
             cloud_auth_id: created.then(|| "id-1".to_string()),
             secret_origin: "rbxapikey.lock.toml".to_string(),
             secret: secret.map(|s| s.to_string()),
+            secret_error: None,
         }
+    }
+
+    /// A declared key whose secret file is there and cannot be read.
+    fn unreadable(name: &str) -> DeclaredKey {
+        DeclaredKey {
+            secret_error: Some("failed to read .secrets/ci.env: access denied".into()),
+            ..declared(name, true, None)
+        }
+    }
+
+    /// Diagnosing `RBX_API_KEY` goes on past a declared key whose secret
+    /// cannot be read, and reports it as a finding on that key.
+    #[test]
+    fn an_unreadable_secret_is_a_finding_on_its_key() {
+        let active = Some(ActiveKey {
+            secret: "not-a-real-secret".into(),
+            origin: KeyOrigin::EnvVar,
+        });
+        let declared = vec![declared("deploy", true, Some("s")), unreadable("ci")];
+
+        let section = credentials_section(&flags(), &declared, &active, None, None);
+
+        assert_eq!(section.lines[0].status, report::Status::Ok);
+        let ci = section
+            .lines
+            .iter()
+            .find(|l| l.label.contains("ci"))
+            .expect("a line about ci");
+        assert_eq!(ci.status, report::Status::Warn);
+        assert!(ci.detail.contains(".secrets/ci.env"), "{}", ci.detail);
+    }
+
+    /// Asked about that key, the failure says the secret is there and
+    /// unreadable, not that it is missing: "create it" would be wrong advice.
+    #[test]
+    fn asking_about_a_key_whose_secret_cannot_be_read_says_why() {
+        let declared = vec![unreadable("ci")];
+
+        let section = credentials_section(&flags(), &declared, &None, Some("ci"), None);
+
+        let line = &section.lines[0];
+        assert_eq!(line.status, report::Status::Fail);
+        assert!(line.detail.contains("cannot be read"), "{}", line.detail);
+        assert!(!line.action.as_ref().unwrap().contains("rbx-apikey create"));
+        assert_eq!(
+            section
+                .lines
+                .iter()
+                .filter(|l| l.detail.contains(".secrets/ci.env"))
+                .count(),
+            1,
+            "reported once"
+        );
     }
 
     fn flags() -> GlobalFlags {
