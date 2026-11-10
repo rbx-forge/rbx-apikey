@@ -98,10 +98,14 @@ struct ActiveKey {
 pub async fn run(cli: DoctorCli, global: &GlobalFlags) -> Result<()> {
     println!("{}", "rbx-apikey doctor".cyan().bold());
 
-    // `?`: a config or lockfile that is there and cannot be read stops the
-    // diagnosis, naming the file. Defaulted to empty, the report said this
-    // directory declares no keys, about a directory that does.
-    let declared = diagnostics::declared_keys()?;
+    // A config or lockfile that is there and cannot be read is a finding, and
+    // the diagnosis goes on with what does not depend on it: the key in
+    // RBX_API_KEY, the session, the probe. Defaulted to empty without a word,
+    // the report said this directory declares no keys, about one that does.
+    let (declared, declared_error) = match diagnostics::declared_keys() {
+        Ok(keys) => (keys, None),
+        Err(e) => (Vec::new(), Some(format!("{e:#}"))),
+    };
     let mut r = Report::default();
 
     let active = resolve_active_key(&cli, global, &declared);
@@ -115,6 +119,7 @@ pub async fn run(cli: DoctorCli, global: &GlobalFlags) -> Result<()> {
         &active,
         cli.key.as_deref(),
         cookie.as_deref(),
+        declared_error.as_deref(),
     );
     credentials.push(session_line(cookie.as_deref(), &session::SessionCheck::default()).await);
     r.push(credentials);
@@ -180,12 +185,28 @@ fn credentials_section(
     active: &Option<ActiveKey>,
     requested_key: Option<&str>,
     cookie: Option<&str>,
+    declared_error: Option<&str>,
 ) -> Section {
     let mut s = Section::new("Credentials");
 
     match active {
         Some(key) => s.push(Line::ok("API key", key.origin.describe())),
         None => match requested_key {
+            // The declared keys could not be read, so neither the name nor
+            // its secret can be looked up: the reason is the line below.
+            Some(name) if declared_error.is_some() => s.push(Line::fail(
+                "API key",
+                format!("\"{name}\" cannot be looked up"),
+                "This directory's declared keys could not be read: see \"declared keys\" below. \
+                 Fix that, or run `rbx-apikey doctor` with no --key to report on whatever \
+                 RBX_API_KEY holds.",
+            )),
+            None if declared_error.is_some() => s.push(Line::fail(
+                "API key",
+                "none loaded",
+                "Set one with `export RBX_API_KEY=<key>`. The keys this directory declares \
+                 cannot be loaded until the file named under \"declared keys\" below is fixed.",
+            )),
             Some(name) if !declared.iter().any(|k| k.name == name) => s.push(Line::fail(
                 "API key",
                 format!("no key named \"{name}\" in rbxapikey.toml"),
@@ -253,7 +274,14 @@ fn credentials_section(
         )),
     }
 
-    if diagnostics::config_file_present() {
+    if let Some(why) = declared_error {
+        s.push(Line::fail(
+            "declared keys",
+            format!("could not be read: {why}"),
+            "Every command that reads this file stops on it too. Fix the file named above; \
+             the checks that need a declared key are reported as not run.",
+        ));
+    } else if diagnostics::config_file_present() {
         let created = declared.iter().filter(|k| k.is_created()).count();
         s.push(Line::info(
             "rbxapikey.toml",
@@ -827,7 +855,7 @@ mod tests {
         });
         let declared = vec![declared("deploy", true, Some("s")), unreadable("ci")];
 
-        let section = credentials_section(&flags(), &declared, &active, None, None);
+        let section = credentials_section(&flags(), &declared, &active, None, None, None);
 
         assert_eq!(section.lines[0].status, report::Status::Ok);
         let ci = section
@@ -839,13 +867,43 @@ mod tests {
         assert!(ci.detail.contains(".secrets/ci.env"), "{}", ci.detail);
     }
 
+    /// A config or lockfile that cannot be read is a finding, and the key in
+    /// RBX_API_KEY is still diagnosed: it does not depend on that file.
+    #[test]
+    fn declared_keys_that_cannot_be_read_are_a_finding_not_a_stop() {
+        let active = Some(ActiveKey {
+            secret: "not-a-real-secret".into(),
+            origin: KeyOrigin::EnvVar,
+        });
+        let why = "failed to parse rbxapikey.toml: expected `=`";
+
+        let section = credentials_section(&flags(), &[], &active, None, None, Some(why));
+
+        assert_eq!(section.lines[0].status, report::Status::Ok);
+        let line = section
+            .lines
+            .iter()
+            .find(|l| l.label == "declared keys")
+            .expect("the file is reported");
+        assert_eq!(line.status, report::Status::Fail);
+        assert!(line.detail.contains("rbxapikey.toml"), "{}", line.detail);
+
+        // With no key loaded, the directory is not said to declare none.
+        let section = credentials_section(&flags(), &[], &None, None, None, Some(why));
+        assert!(
+            !section.lines[0].detail.contains("declares none"),
+            "{}",
+            section.lines[0].detail
+        );
+    }
+
     /// Asked about that key, the failure says the secret is there and
     /// unreadable, not that it is missing: "create it" would be wrong advice.
     #[test]
     fn asking_about_a_key_whose_secret_cannot_be_read_says_why() {
         let declared = vec![unreadable("ci")];
 
-        let section = credentials_section(&flags(), &declared, &None, Some("ci"), None);
+        let section = credentials_section(&flags(), &declared, &None, Some("ci"), None, None);
 
         let line = &section.lines[0];
         assert_eq!(line.status, report::Status::Fail);
@@ -913,7 +971,7 @@ mod tests {
     #[test]
     fn naming_an_undeclared_key_fails_with_the_names_that_do_exist() {
         let declared = vec![declared("deploy", true, Some("s"))];
-        let section = credentials_section(&flags(), &declared, &None, Some("typo"), None);
+        let section = credentials_section(&flags(), &declared, &None, Some("typo"), None, None);
 
         let line = &section.lines[0];
         assert_eq!(line.status, report::Status::Fail);
@@ -923,7 +981,7 @@ mod tests {
 
     #[test]
     fn no_key_anywhere_says_how_to_get_one() {
-        let section = credentials_section(&flags(), &[], &None, None, None);
+        let section = credentials_section(&flags(), &[], &None, None, None, None);
         let action = section.lines[0].action.as_ref().unwrap();
         assert!(action.contains("RBX_API_KEY"));
         assert!(action.contains("rbxapikey.toml"));
@@ -937,7 +995,7 @@ mod tests {
             secret: "s".into(),
             origin: KeyOrigin::EnvVar,
         });
-        let section = credentials_section(&flags(), &[], &active, None, None);
+        let section = credentials_section(&flags(), &[], &active, None, None, None);
 
         assert_eq!(section.lines[0].status, report::Status::Ok);
         assert!(section.lines[0].detail.contains("RBX_API_KEY"));
