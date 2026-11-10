@@ -25,14 +25,15 @@ Optional fields are absent rather than `null`. `schema_version` is `1`.
       "expires_at": "2027-08-01T10:00:00.000Z",
       "days_until_expiry": 351,
       "secret_present": true,
-      "secret_backend": "file"
+      "secret_backend": "file",
+      "secret_readable": true
     },
     { "name": "newkey", "declared": true, "created": false, "universe_ids": [] }
   ]
 }
 ```
 
-`secret_backend` is `lockfile`, `file`, or `external` for a key printed with `--stdout` (then `secret_present` is `false`: the secret is not held here). `declared` without `created` is pending; `created` without `declared` is an orphan. Lockfile fields are absent for a key never created. `days_until_expiry` is negative once past, absent without expiry. Not combinable with `--expiry-only`.
+`secret_backend` is `lockfile`, `file`, or `external` for a key printed with `--stdout` (then `secret_present` is `false`: the secret is not held here). `secret_readable` is `false` when the secret's file is there and could not be read; `secret_present` is then `false` too, and the error, which names the file, is in the human form only. `declared` without `created` is pending; `created` without `declared` is an orphan. Lockfile fields are absent for a key never created. `days_until_expiry` is negative once past, absent without expiry. Not combinable with `--expiry-only`.
 
 ## rbx-apikey list --remote --json
 
@@ -74,7 +75,7 @@ Optional fields are absent rather than `null`. `schema_version` is `1`.
 }
 ```
 
-`healthy` is `true` only for `HEALTHY`. `remote` says whether Roblox was asked (`ORPHAN_REMOTE` needs it). A drift between the lockfile and `rbxplace.toml` fails before any document.
+`healthy` is `true` only for `HEALTHY`. `status` takes the values listed under [`rbx-apikey status`](../commands.md#rbx-apikey-status), `SECRET_UNREADABLE` among them. `remote` says whether Roblox was asked (`ORPHAN_REMOTE` needs it). A drift between the lockfile and `rbxplace.toml` fails before any document.
 
 ```sh
 rbx-apikey status --json | jq -r '.keys[] | select(.healthy | not) | "\(.name): \(.status)"'

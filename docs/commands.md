@@ -71,7 +71,7 @@ What this project declares and created.
 | `--group-id <id>` | With `--remote`: a group's keys instead of yours |
 | `--json` | One JSON document, never a secret ([fields](reference/json.md#rbx-apikey-list-json)) |
 
-Colours: green over 30 days, cyan 7 to 30, yellow under 7, red expired or secret missing.
+Colours: green over 30 days, cyan 7 to 30, yellow under 7, red expired or secret missing. A secret file that is there and cannot be read is shown on its key as `secret cannot be read`, with the error, and the listing goes on.
 
 `--remote` matches keys to the lockfile by id, never by name (`name_prefix` renames on purpose, and names repeat across accounts). It starts with the account it is listing: if that is not the account you expect, stop.
 
@@ -93,6 +93,7 @@ Compare the file, the lockfile and, with `--remote`, Roblox. Changes nothing.
 | `ORPHAN_LOCK` | In the lockfile, no longer declared |
 | `ORPHAN_REMOTE` | Gone from Roblox (`--remote` only) |
 | `SECRET_MISSING` | No stored secret (a key printed with `--stdout` is not missing: it is held elsewhere) |
+| `SECRET_UNREADABLE` | The secret's file is there and could not be read; the error follows. The other keys are still checked |
 | `DISABLED` | |
 | `CHECK_FAILED` | Roblox could not be asked |
 

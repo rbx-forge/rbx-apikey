@@ -21,6 +21,7 @@ enum Status {
     OrphanLock,
     OrphanRemote,
     SecretMissing,
+    SecretUnreadable,
     Disabled,
     CheckFailed,
 }
@@ -35,6 +36,7 @@ impl Status {
             Status::OrphanLock => "ORPHAN_LOCK",
             Status::OrphanRemote => "ORPHAN_REMOTE",
             Status::SecretMissing => "SECRET_MISSING",
+            Status::SecretUnreadable => "SECRET_UNREADABLE",
             Status::Disabled => "DISABLED",
             Status::CheckFailed => "CHECK_FAILED",
         }
@@ -131,45 +133,8 @@ pub async fn run(global: &GlobalFlags, remote_check: bool, format: OutputFormat)
             ),
             (None, None) => continue, // shouldn't happen since name_set unions them.
             (Some(entry), Some(_)) => {
-                let resolved = secret_store::stored_backend(&cfg, key_cfg, name, Some(entry));
-                let secret = secret_store::read(&resolved, Some(entry))?;
-                // Printed with --stdout: held elsewhere on purpose, not missing.
-                let held_elsewhere = resolved.backend == secret_store::Backend::External;
-
-                if !entry.is_enabled {
-                    (
-                        Status::Disabled,
-                        format!("key is disabled in Roblox - `rbx-apikey update {}`", name),
-                    )
-                } else if secret.is_none() && !held_elsewhere {
-                    let detail = match resolved.backend {
-                        secret_store::Backend::File => {
-                            format!("file {} not found or empty", resolved.target)
-                        }
-                        secret_store::Backend::Lockfile => format!(
-                            "secret missing in lockfile - `rbx-apikey regenerate {}`",
-                            name
-                        ),
-                        // Excluded by `held_elsewhere` above; spelled out for the match.
-                        secret_store::Backend::External => resolved.target.clone(),
-                    };
-                    (Status::SecretMissing, detail)
-                } else if days.map(|d| d < 0).unwrap_or(false) {
-                    let d = days.unwrap();
-                    (
-                        Status::Expired,
-                        format!(
-                            "EXPIRED {}d ago - `rbx-apikey regenerate {}`",
-                            d.abs(),
-                            name
-                        ),
-                    )
-                } else if days.map(|d| d < 7).unwrap_or(false) {
-                    let d = days.unwrap();
-                    (
-                        Status::ExpiringSoon,
-                        format!("expires in {}d - rotate soon", d),
-                    )
+                if let Some(verdict) = local_verdict(&cfg, key_cfg, name, entry, days) {
+                    verdict
                 } else if let Some(c) = &client {
                     match c.get_api_key(&entry.cloud_auth_id).await {
                         // A network/timeout/5xx error means we couldn't verify
@@ -237,4 +202,110 @@ pub async fn run(global: &GlobalFlags, remote_check: bool, format: OutputFormat)
         emit(&document)?;
     }
     Ok(())
+}
+
+/// What the files alone say about a key both of them have, or `None` when
+/// they find nothing wrong and the answer is Roblox's to give.
+///
+/// A secret file that is there and cannot be read is its own verdict, with
+/// the error, and the run goes on to the other keys: it used to stop `status`
+/// at the first such file, and before that to call it missing.
+fn local_verdict(
+    cfg: &config::Config,
+    key_cfg: Option<&config::KeyConfig>,
+    name: &str,
+    entry: &lock::LockEntry,
+    days: Option<i64>,
+) -> Option<(Status, String)> {
+    let resolved = secret_store::stored_backend(cfg, key_cfg, name, Some(entry));
+    // Printed with --stdout: held elsewhere on purpose, not missing.
+    let held_elsewhere = resolved.backend == secret_store::Backend::External;
+    let secret = secret_store::read(&resolved, Some(entry));
+
+    if !entry.is_enabled {
+        return Some((
+            Status::Disabled,
+            format!("key is disabled in Roblox - `rbx-apikey update {}`", name),
+        ));
+    }
+    match secret {
+        Err(e) => {
+            return Some((
+                Status::SecretUnreadable,
+                format!("secret cannot be read: {e:#}"),
+            ))
+        }
+        Ok(None) if !held_elsewhere => {
+            let detail = match resolved.backend {
+                secret_store::Backend::File => {
+                    format!("file {} not found or empty", resolved.target)
+                }
+                secret_store::Backend::Lockfile => format!(
+                    "secret missing in lockfile - `rbx-apikey regenerate {}`",
+                    name
+                ),
+                // Excluded by `held_elsewhere` above; spelled out for the match.
+                secret_store::Backend::External => resolved.target.clone(),
+            };
+            return Some((Status::SecretMissing, detail));
+        }
+        Ok(_) => {}
+    }
+    match days {
+        Some(d) if d < 0 => Some((
+            Status::Expired,
+            format!(
+                "EXPIRED {}d ago - `rbx-apikey regenerate {}`",
+                d.abs(),
+                name
+            ),
+        )),
+        Some(d) if d < 7 => Some((
+            Status::ExpiringSoon,
+            format!("expires in {}d - rotate soon", d),
+        )),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One unreadable secret file is a verdict on its key, with the error,
+    /// and not a stop for the whole run nor a "missing" secret.
+    #[test]
+    fn an_unreadable_secret_is_its_own_verdict() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        // A directory where the file belongs: there, and unreadable as one.
+        let secret_file = dir.path().join("deploy.env");
+        std::fs::create_dir(&secret_file).expect("a directory");
+        let config_path = dir.path().join(config::FILE);
+        std::fs::write(
+            &config_path,
+            format!(
+                "[keys.deploy]\nscopes = [\"universe:read\"]\nsecret_file = '{}'\n",
+                secret_file.display()
+            ),
+        )
+        .expect("a config");
+        let cfg = config::load_from(&config_path).expect("it loads");
+        let entry = lock::LockEntry {
+            cloud_auth_id: "aaaaBBBBccccDDDD".into(),
+            secret: None,
+            secret_file: Some(secret_file.to_string_lossy().to_string()),
+            secret_external: false,
+            creator_id: 1234567890,
+            is_enabled: true,
+            created_at: "now".into(),
+            expires_at: None,
+        };
+
+        let (status, detail) =
+            local_verdict(&cfg, config::get(&cfg, "deploy"), "deploy", &entry, None)
+                .expect("a verdict");
+
+        assert_eq!(status.as_str(), "SECRET_UNREADABLE");
+        assert!(detail.contains("deploy.env"), "{detail}");
+    }
 }
