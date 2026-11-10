@@ -165,6 +165,37 @@ pub fn load_places(global: &GlobalFlags) -> Result<Option<PlacesFile>> {
     PlacesFile::load(&global.places).map(Some)
 }
 
+/// A run decided before it starts, one entry per key: what the run will do
+/// for it, or the note it prints instead of doing anything.
+///
+/// Built once, and read by both the git guard and the loop that does the
+/// work, so the two cannot disagree about which secrets are written where.
+pub(crate) type Plan<T> = Vec<(String, std::result::Result<T, String>)>;
+
+/// Every secret a planned run will write, checked against git in one go,
+/// before the first prompt. `destination` says where an entry writes one, if
+/// it does.
+pub(crate) fn guard_plan<T>(
+    plan: &[(String, std::result::Result<T, String>)],
+    destination: fn(&T) -> Option<&crate::secret_store::Resolved>,
+    lock_path: &std::path::Path,
+    write: crate::git_guard::Write,
+) -> Result<()> {
+    let writes: Vec<(String, crate::secret_store::Resolved)> = plan
+        .iter()
+        .filter_map(|(name, step)| {
+            let resolved = destination(step.as_ref().ok()?)?;
+            Some((name.clone(), resolved.clone()))
+        })
+        .collect();
+    crate::git_guard::check_all(&writes, lock_path, write)
+}
+
+/// For [`guard_plan`]: a plan whose every entry writes a secret.
+pub(crate) fn writes(r: &crate::secret_store::Resolved) -> Option<&crate::secret_store::Resolved> {
+    Some(r)
+}
+
 pub fn require_no_collision(all: bool, name: Option<&str>) -> Result<()> {
     if all && name.is_some() {
         bail!("--all and <key> are mutually exclusive");
