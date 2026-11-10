@@ -139,6 +139,13 @@ pub struct KeyEntry {
     /// the document even when the backend is `file`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret_backend: Option<String>,
+    /// False when the secret's file is there and could not be read (then
+    /// `secret_present` is false too), so a script can tell "missing" from
+    /// "there but unreadable" and the document is still written. The error
+    /// is not carried: it names the file. **Absent** for a key that was never
+    /// created.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_readable: Option<bool>,
 }
 
 impl ListDocument {
@@ -171,7 +178,16 @@ impl KeyEntry {
             days_until_expiry: None,
             secret_present: None,
             secret_backend: None,
+            secret_readable: None,
         }
+    }
+
+    /// The same entry, for a key whose secret file is there and could not be
+    /// read.
+    pub(crate) fn with_unreadable_secret(mut self) -> Self {
+        self.secret_present = Some(false);
+        self.secret_readable = Some(false);
+        self
     }
 
     /// A key the lockfile tracks. `declared` is false for an orphan: a lockfile
@@ -199,6 +215,7 @@ impl KeyEntry {
             days_until_expiry: days_until(entry.expires_at.as_deref()),
             secret_present: Some(secret_present),
             secret_backend: Some(backend.as_str().to_string()),
+            secret_readable: Some(true),
         }
     }
 }
@@ -556,6 +573,7 @@ mod tests {
             "days_until_expiry",
             "secret_present",
             "secret_backend",
+            "secret_readable",
         ] {
             assert!(doc["keys"][0].get(absent).is_none(), "{absent}: {doc}");
         }
@@ -563,6 +581,22 @@ mod tests {
             doc["keys"][0]["universe_ids"].as_array().map(Vec::len),
             Some(0)
         );
+    }
+
+    /// A secret file that is there and could not be read is told apart from
+    /// a missing one, and the error, which names the file, stays out.
+    #[test]
+    fn an_unreadable_secret_is_flagged_without_its_path() {
+        let mut doc = ListDocument::new("name");
+        doc.push(
+            KeyEntry::created("deploy", true, &entry(None), &[], false, &Backend::File)
+                .with_unreadable_secret(),
+        );
+        let doc = parsed(&doc);
+
+        assert_eq!(doc["keys"][0]["secret_present"], false);
+        assert_eq!(doc["keys"][0]["secret_readable"], false);
+        assert!(!doc.to_string().contains("deploy.env"), "{doc}");
     }
 
     /// The orphan, and its opposite. Two booleans rather than one word, because
