@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-10
+
 ### Fixed
 
 - The lockfile and a custom secret file are never emptied before they are written. They were truncated, then written, so a full disk or a run killed mid-write left the only record of the keys empty. The content now goes over the old one, the file is cut to length afterwards, and the old content is put back if a step fails.
