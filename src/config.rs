@@ -654,7 +654,13 @@ pub fn load() -> Result<Config> {
 }
 
 pub fn load_from(path: &Path) -> Result<Config> {
-    if !path.exists() {
+    // `try_exists` and not `exists`: a config that is there and cannot be
+    // looked at is not an absent one, and telling the reader to create a file
+    // they already have sends them the wrong way.
+    let there = path
+        .try_exists()
+        .with_context(|| format!("failed to look at {}", path.display()))?;
+    if !there {
         bail!(
             "{} not found - create it with at least:\n\n  [keys.<name>]\n  envs = [\"<env>\"]\n  scopes = [\"<scopeType>:<op1>,<op2>\"]\n",
             path.display()
@@ -1681,5 +1687,31 @@ ci = [\"dev\"]
         .unwrap_err()
         .to_string();
         assert!(err.contains("viewer_ci"), "got: {err}");
+    }
+
+    /// A config that cannot be looked at is reported as such, naming the
+    /// file. `exists()` read it as absent, and the message then told the
+    /// reader to create a file they already had.
+    #[test]
+    fn a_config_that_cannot_be_looked_at_is_not_reported_missing() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = crate::test_support::unlookable(dir.path());
+
+        let err = format!("{:#}", load_from(&path).expect_err("cannot be looked at"));
+
+        assert!(err.contains("failed to look at"), "got: {err}");
+        assert!(err.contains("cannot-be-looked-at") || err.contains("cannot<be>looked|at"));
+        assert!(!err.contains("not found"), "got: {err}");
+    }
+
+    /// The absent file keeps its message: that one is the reader's to fix.
+    #[test]
+    fn an_absent_config_is_still_reported_missing() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let err = format!(
+            "{:#}",
+            load_from(&dir.path().join(FILE)).expect_err("absent")
+        );
+        assert!(err.contains("not found"), "got: {err}");
     }
 }

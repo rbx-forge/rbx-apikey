@@ -14,6 +14,8 @@
 //! repair, and the boundary is easier to keep if the API it is offered cannot
 //! do otherwise.
 
+use std::path::Path;
+
 use anyhow::{Context, Result};
 
 use rbx_core::GlobalFlags;
@@ -49,13 +51,22 @@ impl DeclaredKey {
 ///
 /// An absent `rbxapikey.toml` yields an empty list rather than an error: a
 /// directory that declares no keys is a directory `doctor` still has useful
-/// things to say about.
+/// things to say about. One that is there and cannot be looked at, read or
+/// parsed is an error: read as absent, `doctor` reported "this directory
+/// declares none" about a directory that declares keys.
 pub fn declared_keys() -> Result<Vec<DeclaredKey>> {
-    if !std::path::Path::new(config::FILE).exists() {
+    declared_keys_in(Path::new(config::FILE), Path::new(lock::FILE))
+}
+
+fn declared_keys_in(config_path: &Path, lock_path: &Path) -> Result<Vec<DeclaredKey>> {
+    let there = config_path
+        .try_exists()
+        .with_context(|| format!("failed to look at {}", config_path.display()))?;
+    if !there {
         return Ok(Vec::new());
     }
-    let cfg = config::load()?;
-    let lk = lock::load()?;
+    let cfg = config::load_from(config_path)?;
+    let lk = lock::load_from(lock_path)?;
 
     Ok(cfg
         .keys
@@ -80,8 +91,11 @@ pub fn declared_keys() -> Result<Vec<DeclaredKey>> {
 }
 
 /// Whether the config file this project uses for keys is even here.
+///
+/// A file that cannot be looked at counts as here: `declared_keys` has already
+/// stopped on it by the time `doctor` asks this.
 pub fn config_file_present() -> bool {
-    std::path::Path::new(config::FILE).exists()
+    Path::new(config::FILE).try_exists().unwrap_or(true)
 }
 
 /// What Roblox holds for one key.
@@ -143,16 +157,26 @@ pub enum KeyMatch {
 /// has been using for a month, which is exactly the key `doctor` is asked
 /// about.
 pub async fn identify_secret(global: &GlobalFlags, secret: &str) -> Result<KeyMatch> {
-    let client = make_client(global);
+    identify_secret_with(&make_client(global), Path::new(lock::FILE), secret).await
+}
+
+async fn identify_secret_with(
+    client: &RbxApiKeyClient,
+    lock_path: &Path,
+    secret: &str,
+) -> Result<KeyMatch> {
     // Fail early and with the cookie message rather than sending an
     // unauthenticated POST and reporting whatever Roblox says about it.
     client.cookie_header()?;
+    // Before the listing, and with `?`: an absent lockfile already loads as an
+    // empty one, so a default here only ever replaced an error, and an
+    // unreadable lockfile then showed the key as one this project never made.
+    let lk = lock::load_from(lock_path)?;
 
     let remote = client
         .list_all_api_keys(None)
         .await
         .context("listing the account's API keys to identify the active one")?;
-    let lk = lock::load().unwrap_or_default();
     let joined = remote_view::join_with_lock(remote, &lk);
 
     let matched: Vec<_> = joined
@@ -183,14 +207,22 @@ pub async fn identify_secret(global: &GlobalFlags, secret: &str) -> Result<KeyMa
 /// environment: there is no secret to match on, and the lockfile already knows
 /// the id.
 pub async fn facts_for_id(global: &GlobalFlags, cloud_auth_id: &str) -> Result<Option<KeyFacts>> {
-    let client = make_client(global);
+    facts_for_id_with(&make_client(global), Path::new(lock::FILE), cloud_auth_id).await
+}
+
+async fn facts_for_id_with(
+    client: &RbxApiKeyClient,
+    lock_path: &Path,
+    cloud_auth_id: &str,
+) -> Result<Option<KeyFacts>> {
     client.cookie_header()?;
+    // As in `identify_secret_with`.
+    let lk = lock::load_from(lock_path)?;
 
     let remote = client
         .list_all_api_keys(None)
         .await
         .context("listing the account's API keys")?;
-    let lk = lock::load().unwrap_or_default();
     Ok(remote_view::join_with_lock(remote, &lk)
         .iter()
         .find(|k| k.info.id == cloud_auth_id)
@@ -317,6 +349,62 @@ mod tests {
         let mut f = facts(&[]);
         f.days_left = Some(-3);
         assert!(f.is_expired());
+    }
+
+    /// What `doctor` stands on: a config or a lockfile that cannot be looked
+    /// at is an error naming it, never "this directory declares none".
+    #[test]
+    fn declared_keys_stop_on_a_file_that_cannot_be_looked_at() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let unlookable = crate::test_support::unlookable(dir.path());
+        let lock_path = dir.path().join(lock::FILE);
+
+        let err = declared_keys_in(&unlookable, &lock_path).expect_err("config");
+        assert!(format!("{err:#}").contains("failed to look at"), "{err:#}");
+
+        let config_path = dir.path().join(config::FILE);
+        std::fs::write(
+            &config_path,
+            "[keys.deploy]\nscopes = [\"universe:read\"]\n",
+        )
+        .expect("a config");
+        let err = declared_keys_in(&config_path, &unlookable).expect_err("lockfile");
+        assert!(format!("{err:#}").contains("failed to look at"), "{err:#}");
+
+        // Absent is still an empty directory, not an error.
+        let absent = dir.path().join("absent.toml");
+        assert!(declared_keys_in(&absent, &lock_path)
+            .expect("absent")
+            .is_empty());
+    }
+
+    /// The two lookups by account listing. A lockfile that cannot be looked
+    /// at stops them before Roblox is asked; defaulted to empty, it reported
+    /// a key this project tracks as one it never made.
+    #[tokio::test]
+    async fn the_account_lookups_stop_on_a_lockfile_that_cannot_be_looked_at() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let lock_path = crate::test_support::unlookable(dir.path());
+        let server = wiremock::MockServer::start().await;
+        let client = RbxApiKeyClient::new(Some("doctor-unlookable".to_string()))
+            .with_base_url(server.uri())
+            .with_users_base_url(server.uri());
+
+        let err = identify_secret_with(&client, &lock_path, "not-a-real-secret")
+            .await
+            .expect_err("identify");
+        assert!(format!("{err:#}").contains("failed to look at"), "{err:#}");
+
+        let err = facts_for_id_with(&client, &lock_path, "aaaaBBBBccccDDDD")
+            .await
+            .expect_err("facts");
+        assert!(format!("{err:#}").contains("failed to look at"), "{err:#}");
+
+        assert!(server
+            .received_requests()
+            .await
+            .expect("recording")
+            .is_empty());
     }
 
     #[test]

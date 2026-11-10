@@ -34,6 +34,8 @@ mod remote_view;
 pub mod scope_builder;
 pub mod scope_catalog;
 mod secret_store;
+#[cfg(test)]
+mod test_support;
 mod time_iso;
 
 use anyhow::Result;

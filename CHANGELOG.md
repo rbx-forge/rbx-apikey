@@ -5,6 +5,7 @@
 ### Fixed
 
 - `regenerate` and `update` refuse to write a secret into a file git does not ignore, as `create` does, and all three check a `secret_file` as well as the lockfile. `create` checked only the lockfile, and `regenerate` and `update` checked nothing. The check runs before Roblox is asked, so a refused rotation keeps the old secret and a refused move leaves the key unchanged. A relative secret file path is checked where it is, and a `.git` that cannot be looked at gives a warning instead of passing as "not a repository".
+- An `rbxplace.toml`, an `rbxapikey.toml` or a lockfile that is there and cannot be looked at stops the command, naming the file. Each read as absent somewhere: the env file switched the drift check off without a word, the config was reported missing with advice to create it, and `list --remote` and `doctor` showed every key of the project as untracked. `doctor` also stops on a config or lockfile it cannot read or parse, which it used to report as a directory declaring no keys.
 
 ## [0.1.2] - 2026-11-10
 
