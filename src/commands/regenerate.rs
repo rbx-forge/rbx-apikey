@@ -6,7 +6,7 @@ use anyhow::{bail, Result};
 use colored::Colorize;
 use dialoguer::Confirm;
 
-use crate::{config, lock, secret_store, time_iso};
+use crate::{config, git_guard, lock, secret_store, time_iso};
 use rbx_core::confirm::confirm_always;
 use rbx_core::GlobalFlags;
 
@@ -192,6 +192,26 @@ async fn regenerate_one(
         }
     };
 
+    let key_cfg = config::get(cfg, name);
+
+    // Where the OLD (now-invalidated) secret was stored, vs. where the NEW one belongs.
+    // After a successful rotate, the OLD location holds garbage; we offer to clean it up
+    // when `secret_file` was changed in rbxapikey.toml between writes.
+    let previous_resolved = secret_store::previous_backend_from_entry(&entry, name);
+    let new_resolved = if stdout {
+        secret_store::external()
+    } else {
+        secret_store::backend_for(cfg, key_cfg, name)
+    };
+    let backend_changed = secret_store::backend_differs(&previous_resolved, &new_resolved);
+
+    // Before Roblox is asked: once it answers, the old secret is dead, and a
+    // refusal then would leave the new one with nowhere to go.
+    if let Err(e) = git_guard::check(&new_resolved, lock_path, git_guard::Write::Rotate) {
+        say!("{}", format!("\"{}\": {}", name, e).yellow());
+        return Rotation::Untouched;
+    }
+
     say!("Regenerating \"{}\" (id={})...", name, entry.cloud_auth_id);
     let resp = match client.regenerate_secret(&entry.cloud_auth_id).await {
         Ok(r) => r,
@@ -205,18 +225,6 @@ async fn regenerate_one(
     };
 
     let new_secret = resp.apikey_secret;
-    let key_cfg = config::get(cfg, name);
-
-    // Where the OLD (now-invalidated) secret was stored, vs. where the NEW one belongs.
-    // After a successful rotate, the OLD location holds garbage; we offer to clean it up
-    // when `secret_file` was changed in rbxapikey.toml between writes.
-    let previous_resolved = secret_store::previous_backend_from_entry(&entry, name);
-    let new_resolved = if stdout {
-        secret_store::external()
-    } else {
-        secret_store::backend_for(cfg, key_cfg, name)
-    };
-    let backend_changed = secret_store::backend_differs(&previous_resolved, &new_resolved);
 
     if stdout {
         // Printed before anything else can fail: the old secret is already
@@ -429,6 +437,66 @@ mod tests {
         .await;
 
         assert_eq!(outcome, Rotation::Unsaved);
+    }
+
+    /// The lockfile is where the rotated secret would go, and git does not
+    /// ignore it. Roblox must not be asked: once it answers, the old secret is
+    /// dead, and refusing then would leave the new one nowhere.
+    #[tokio::test]
+    async fn a_lockfile_git_does_not_ignore_stops_the_rotation_before_roblox() {
+        let dir = git_guard::tests::repo();
+        let lock_path = dir.path().join(lock::FILE);
+        let mut lk = lock_with_key();
+        lock::save_to(&lk, &lock_path).unwrap();
+        let (client, server) = rotating("regenerate-guard-lockfile").await;
+
+        let outcome = regenerate_one(
+            &config::Config::default(),
+            &mut lk,
+            &client,
+            "deploy",
+            true,
+            false,
+            &lock_path,
+        )
+        .await;
+
+        assert_eq!(outcome, Rotation::Untouched);
+        assert!(server.received_requests().await.unwrap().is_empty());
+        let on_disk = lock::load_from(&lock_path).unwrap();
+        assert_eq!(
+            lock::get(&on_disk, "deploy").unwrap().secret.as_deref(),
+            Some("the-old-secret")
+        );
+    }
+
+    /// The same for a `secret_file`, with the lockfile itself ignored: the
+    /// secret does not go into the lockfile, so its file is the one judged.
+    #[tokio::test]
+    async fn a_secret_file_git_does_not_ignore_stops_the_rotation_before_roblox() {
+        let dir = git_guard::tests::repo();
+        std::fs::write(dir.path().join(".gitignore"), "rbxapikey.lock.toml\n").unwrap();
+        let secret_file = dir.path().join(".secrets").join("deploy.env");
+        let config_path = dir.path().join(config::FILE);
+        std::fs::write(
+            &config_path,
+            format!(
+                "[keys.deploy]\nscopes = [\"universe:read\"]\nsecret_file = '{}'\n",
+                secret_file.display()
+            ),
+        )
+        .unwrap();
+        let cfg = config::load_from(&config_path).unwrap();
+        let lock_path = dir.path().join(lock::FILE);
+        let mut lk = lock_with_key();
+        let (client, server) = rotating("regenerate-guard-secret-file").await;
+
+        let outcome =
+            regenerate_one(&cfg, &mut lk, &client, "deploy", true, false, &lock_path).await;
+
+        assert_eq!(outcome, Rotation::Untouched);
+        assert!(server.received_requests().await.unwrap().is_empty());
+        assert!(!secret_file.try_exists().unwrap(), "nothing was written");
     }
 
     /// The bug this exists for: `Old secrets invalid as of <now>` printed after

@@ -48,7 +48,7 @@ rbx-apikey resolve deploy       # print the secret, for a script
 rbx-apikey doctor               # why doesn't this key work?
 ```
 
-Gitignore `.secrets/`: `create` refuses to write a secret into a file git tracks. Key administration is not on Open Cloud, so these commands use a Roblox session cookie, from `--cookie`, `RBX_COOKIE`, or a signed-in Studio after asking.
+Gitignore `.secrets/`: `create`, `regenerate` and `update` refuse to write a secret into a file git does not ignore, before anything is sent to Roblox. Key administration is not on Open Cloud, so these commands use a Roblox session cookie, from `--cookie`, `RBX_COOKIE`, or a signed-in Studio after asking.
 
 `schemas/rbxapikey.schema.json` validates `rbxapikey.toml` in editors that read JSON Schema.
 

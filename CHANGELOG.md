@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `regenerate` and `update` refuse to write a secret into a file git does not ignore, as `create` does, and all three check a `secret_file` as well as the lockfile. `create` checked only the lockfile, and `regenerate` and `update` checked nothing. The check runs before Roblox is asked, so a refused rotation keeps the old secret and a refused move leaves the key unchanged. A relative secret file path is checked where it is, and a `.git` that cannot be looked at gives a warning instead of passing as "not a repository".
+
 ## [0.1.2] - 2026-11-10
 
 ### Fixed
