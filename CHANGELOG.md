@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- The lockfile and a custom secret file are never emptied before they are written. They were truncated, then written, so a full disk or a run killed mid-write left the only record of the keys empty. The content now goes over the old one, the file is cut to length afterwards, and the old content is put back if a step fails.
 - `update --all` records each key in the lockfile as soon as Roblox has taken its update. It saved once at the end, so a refusal or a "no" on a later key lost the record of the keys already updated, including where a migrated secret had moved to after its old file was deleted.
 - `prune` stops on a config or a lockfile it cannot read. It read either as empty, which labelled every key of the project UNTRACKED and deleted it without its record, then overwrote the unreadable lockfile with an empty one. It also leaves no lockfile behind when no tracked key was deleted.
 - `prune` and `delete --all` record each key as soon as Roblox has deleted it, like `update --all`. They saved once at the end, so a run stopped at the question about a secret file kept listing keys that no longer existed.
