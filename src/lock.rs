@@ -96,7 +96,13 @@ pub fn load() -> Result<Lock> {
 }
 
 pub fn load_from(path: &Path) -> Result<Lock> {
-    if !path.exists() {
+    // `try_exists` and not `exists`: a lockfile that is there and cannot be
+    // looked at is not an absent one. Read as absent, every key it tracks
+    // would look untracked to `prune`, and the next save would replace it.
+    let there = path
+        .try_exists()
+        .with_context(|| format!("failed to look at {}", path.display()))?;
+    if !there {
         return Ok(Lock::default());
     }
     let raw = std::fs::read_to_string(path)
@@ -258,6 +264,33 @@ mod tests {
         };
         let s = toml::to_string(&env).unwrap();
         assert!(s.contains("owner_type = \"user\""), "got {}", s);
+    }
+
+    /// A lockfile nobody can look at is not an absent one. `exists()` answers
+    /// "no" to both, and an absent lockfile loads as an empty one: every key
+    /// the real file tracks would then look untracked.
+    #[cfg(unix)]
+    #[test]
+    fn a_lockfile_that_cannot_be_looked_at_is_not_an_absent_one() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let closed = dir.path().join("closed");
+        std::fs::create_dir(&closed).unwrap();
+        let path = closed.join(FILE);
+        std::fs::write(&path, "version = 4\n").unwrap();
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root looks wherever it likes, and then there is nothing to show.
+        let blind = path.try_exists().is_err();
+
+        let loaded = load_from(&path);
+
+        // Reopened before any assertion, so the directory can be cleaned up.
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if blind {
+            let err = loaded.expect_err("a lockfile that cannot be looked at is not empty");
+            assert!(format!("{err:#}").contains("failed to look at"), "{err:#}");
+        }
     }
 
     #[test]

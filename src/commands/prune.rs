@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use dialoguer::{Confirm, MultiSelect};
 
@@ -127,14 +127,16 @@ pub async fn run(global: &GlobalFlags, opts: PruneOptions) -> Result<()> {
     }
 
     let mut failures = 0usize;
-    let mut lock_touched = false;
     for action in plan(&chosen) {
         match action {
             // Reuses the ordinary delete path so the lockfile entry and the
             // stored secret go with the key. A bare remote delete would leave
             // a lockfile pointing at nothing and an orphan secret on disk.
+            //
+            // It also saves the lockfile itself, key by key. Untracked keys
+            // leave nothing behind locally, so a prune run outside any project
+            // writes no lockfile at all.
             PruneAction::Tracked { lock_name } => {
-                lock_touched = true;
                 let done = super::delete::delete_one(
                     &cfg,
                     &mut lk,
@@ -142,6 +144,7 @@ pub async fn run(global: &GlobalFlags, opts: PruneOptions) -> Result<()> {
                     &lock_name,
                     opts.yes,
                     opts.clean_files,
+                    Path::new(lock::FILE),
                 )
                 .await;
                 if !done {
@@ -156,14 +159,6 @@ pub async fn run(global: &GlobalFlags, opts: PruneOptions) -> Result<()> {
                 }
             },
         }
-    }
-
-    // Untracked keys leave nothing behind locally: we never stored their
-    // secrets. So the lockfile is written only when a tracked key went, which
-    // also keeps a prune run outside any project from leaving an empty
-    // lockfile behind.
-    if lock_touched {
-        lock::save(&lk)?;
     }
 
     if failures > 0 {
@@ -181,7 +176,12 @@ pub async fn run(global: &GlobalFlags, opts: PruneOptions) -> Result<()> {
 /// came to be labelled UNTRACKED, deleted without its record, and the
 /// unreadable lockfile then overwritten with an empty one.
 fn load_local(config_path: &Path, lock_path: &Path) -> Result<(config::Config, lock::Lock)> {
-    let cfg = if config_path.exists() {
+    // `try_exists`, because `exists` answers "no" to a file it could not look
+    // at, and that is the one answer this must not give by accident.
+    let there = config_path
+        .try_exists()
+        .with_context(|| format!("failed to look at {}", config_path.display()))?;
+    let cfg = if there {
         config::load_from(config_path)?
     } else {
         config::Config::default()

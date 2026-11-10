@@ -1,5 +1,7 @@
 //! `rbx-apikey delete <key>|--all`: remove a key from Roblox and the local lock.
 
+use std::path::Path;
+
 use anyhow::{bail, Result};
 use colored::Colorize;
 use dialoguer::Confirm;
@@ -119,13 +121,24 @@ pub async fn run(
     // the same key names recur across accounts and a delete cannot be undone.
     client.require_valid_session().await?;
 
+    // No save after the loop: each key records its own removal as soon as
+    // Roblox has confirmed it. See `delete_one`.
     let mut failures = 0usize;
     for n in &names {
-        if !delete_one(&cfg, &mut lk, &client, n, skip_confirm, clean_files).await {
+        let done = delete_one(
+            &cfg,
+            &mut lk,
+            &client,
+            n,
+            skip_confirm,
+            clean_files,
+            Path::new(lock::FILE),
+        )
+        .await;
+        if !done {
             failures += 1;
         }
     }
-    lock::save(&lk)?;
 
     if failures > 0 {
         bail!("{failures} key(s) could not be deleted");
@@ -137,8 +150,9 @@ pub async fn run(
 /// the stored secret. `prune` calls this for its tracked selections so the
 /// cleanup cannot drift between the two commands.
 ///
-/// Returns whether the key is gone. On `false` the failure is already printed
-/// and the record is untouched, and the caller owes a non-zero exit.
+/// Returns whether the key is gone and its record with it. On `false` the
+/// failure is already printed, the lockfile on disk is as it was, and the
+/// caller owes a non-zero exit.
 pub(crate) async fn delete_one(
     cfg: &config::Config,
     lk: &mut lock::Lock,
@@ -146,6 +160,7 @@ pub(crate) async fn delete_one(
     name: &str,
     skip_confirm: bool,
     clean_files: bool,
+    lock_path: &Path,
 ) -> bool {
     let entry = match lock::get(lk, name).cloned() {
         Some(e) => e,
@@ -200,6 +215,22 @@ pub(crate) async fn delete_one(
     };
 
     lock::remove(lk, name);
+    // On disk now, and not after the last key of an `--all` or a `prune`. The
+    // key is gone from Roblox, and the question about its secret file comes
+    // next: saved once at the end, a run stopped there kept listing as live a
+    // key that no longer existed.
+    if let Err(e) = lock::save_to(lk, lock_path) {
+        println!(
+            "{}",
+            format!(
+                "✗ \"{name}\" is deleted on Roblox, but {} could not be saved and still lists \
+                 it: {e:#}",
+                lock_path.display()
+            )
+            .red()
+        );
+        return false;
+    }
 
     let should_delete_file =
         if resolved.backend == secret_store::Backend::File && !clean_files && !skip_confirm {
@@ -280,6 +311,10 @@ mod tests {
 
     /// One server answering both the session question and the delete. The
     /// cookie is unique per test because the session check caches by cookie.
+    ///
+    /// The lock handed back is the one read from disk once `delete_one` has
+    /// returned, with no save after it: that file is the record, and a run
+    /// stopped before a save at the end kept listing a key that was gone.
     async fn run_delete(
         cookie: &str,
         signed_in: u64,
@@ -304,7 +339,11 @@ mod tests {
             .with_users_base_url(server.uri());
         client.require_valid_session().await.unwrap();
 
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join(lock::FILE);
         let mut lk = lock_with_key();
+        lock::save_to(&lk, &lock_path).unwrap();
+
         let done = delete_one(
             &config::Config::default(),
             &mut lk,
@@ -312,9 +351,10 @@ mod tests {
             "deploy",
             true,
             false,
+            &lock_path,
         )
         .await;
-        (done, lk, server)
+        (done, lock::load_from(&lock_path).unwrap(), server)
     }
 
     async fn delete_requests(server: &MockServer) -> usize {
