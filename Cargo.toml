@@ -1,6 +1,6 @@
 [package]
 name = "rbx-apikey"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 # Set by a dependency, not by this crate's own sources: `image`, which arrives
 # through `rbx-core`, declares 1.88. It moves when a dependency moves it; the
@@ -54,7 +54,7 @@ schemars = { version = "0.8", default-features = false, features = ["derive"], o
 # cookie lookup with its consent prompt, `rbxplace.toml` parsing and the
 # lockfile writer. A branch rather than a rev: Cargo.lock pins the exact
 # commit, and `cargo update -p rbx-core` is how a fix arrives.
-rbx-core = { git = "https://github.com/rbx-forge/rbx-core", tag = "v0.1.3" }
+rbx-core = { git = "https://github.com/rbx-forge/rbx-core", tag = "v0.1.4" }
 
 [dev-dependencies]
 tempfile = "3"
