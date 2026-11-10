@@ -224,8 +224,10 @@ fn credentials_section(
                 Some(why) => s.push(Line::fail(
                     "API key",
                     format!("\"{name}\"'s secret cannot be read: {why}"),
-                    "The secret is stored, and this account cannot read it. Check who may \
-                     read the file named above; nothing needs recreating.",
+                    format!(
+                        "The error above says what failed. Write the secret back into that \
+                         file, or run `rbx-apikey regenerate {name}` for a new one."
+                    ),
                 )),
                 None => s.push(Line::fail(
                     "API key",
@@ -306,10 +308,12 @@ fn credentials_section(
                 format!("\"{}\" secret", key.name),
                 format!("cannot be read: {why}"),
             )
-            .with_action(
-                "Commands that use this key's secret stop on it. Check who may read the file \
-                 named above.",
-            ),
+            .with_action(format!(
+                "Commands that use this key's secret stop on it. The error says what failed: \
+                 write the secret back into that file, or run `rbx-apikey regenerate {}` for a \
+                 new one.",
+                key.name
+            )),
         );
     }
 
@@ -918,6 +922,31 @@ mod tests {
             1,
             "reported once"
         );
+    }
+
+    /// A read fails for more than permissions: a directory where the file
+    /// belongs, content that is not UTF-8, a path through a file. The advice
+    /// must not guess which, and must give a way out that works for all.
+    #[test]
+    fn the_advice_for_an_unreadable_secret_does_not_guess_permissions() {
+        let active = Some(ActiveKey {
+            secret: "not-a-real-secret".into(),
+            origin: KeyOrigin::EnvVar,
+        });
+        let declared = vec![unreadable("ci")];
+
+        let asked = credentials_section(&flags(), &declared, &None, Some("ci"), None, None);
+        let other = credentials_section(&flags(), &declared, &active, None, None, None);
+        let warned = other.lines.iter().find(|l| l.label.contains("ci")).unwrap();
+
+        for action in [
+            asked.lines[0].action.as_deref().unwrap(),
+            warned.action.as_deref().unwrap(),
+        ] {
+            assert!(action.contains("rbx-apikey regenerate ci"), "{action}");
+            assert!(!action.contains("who may read"), "{action}");
+            assert!(!action.contains("nothing needs"), "{action}");
+        }
     }
 
     fn flags() -> GlobalFlags {
