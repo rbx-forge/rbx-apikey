@@ -15,8 +15,9 @@
 //!
 //! Three commands put a secret on disk: `create` stores a new one,
 //! `regenerate` stores the rotated one, and `update` moves one when
-//! `secret_file` changed. Each runs [`check`] on the destination before it
-//! writes, whether that is the lockfile or a `secret_file`. A secret file is
+//! `secret_file` changed. Each runs [`check_all`] on every key's destination,
+//! the lockfile or a `secret_file`, before its first prompt, and refuses the
+//! whole run, naming every refused key, if any of them fails. A secret file is
 //! the user's own choice of location, but a choice is not a `.gitignore`
 //! entry, and the README's `.secrets/` advice is only advice until something
 //! checks it.
@@ -76,18 +77,18 @@ pub enum Write {
 impl Write {
     fn doing(self) -> &'static str {
         match self {
-            Write::Create => "Creating the key now",
-            Write::Rotate => "Rotating the secret now",
-            Write::Move => "Moving the secret there",
+            Write::Create => "Creating these keys now",
+            Write::Rotate => "Rotating these secrets now",
+            Write::Move => "Moving these secrets there",
         }
     }
 
     fn nothing(self) -> &'static str {
         match self {
             Write::Create => "Nothing has been created.",
-            Write::Rotate => "Nothing has been rotated: the key keeps the secret it has.",
+            Write::Rotate => "Nothing has been rotated: every key keeps the secret it has.",
             Write::Move => {
-                "Nothing has been changed: the secret stays where it is, and the key was not \
+                "Nothing has been changed: every secret stays where it is, and no key was \
                  updated."
             }
         }
@@ -104,33 +105,61 @@ pub fn destination(resolved: &Resolved, lock_path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Stop before a secret is written where git would commit it.
-///
-/// `lock_path` is where the lockfile backend writes. Refuses when git does not
-/// ignore the destination, warns on stderr when git cannot say, and passes
-/// outside a repository. Callers run it before anything is sent to Roblox.
-pub fn check(resolved: &Resolved, lock_path: &Path, write: Write) -> Result<()> {
-    let Some(path) = destination(resolved, lock_path) else {
-        return Ok(());
-    };
-    check_path(&path, resolved.backend == Backend::Lockfile, write)
+/// One file git would commit, and the keys whose secrets were headed there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    pub path: PathBuf,
+    pub is_lockfile: bool,
+    pub keys: Vec<String>,
 }
 
-fn check_path(path: &Path, is_lockfile: bool, write: Write) -> Result<()> {
-    match status_of(path) {
-        GitStatus::NotARepo | GitStatus::Ignored => Ok(()),
-        GitStatus::Tracked => bail!(refusal(path, is_lockfile, write)),
-        // An unanswerable check is not a verdict: git missing from PATH is not
-        // evidence that the file is safe, nor that it is not.
-        GitStatus::Unknown(why) => {
-            eprintln!(
-                "warning: could not check whether {} is gitignored ({why}); the key secret is \
-                 stored there in plain text",
-                path.display()
-            );
-            Ok(())
+/// Stop a whole run before any secret is written where git would commit it.
+///
+/// `writes` is every key the run is about to write a secret for, with where
+/// it would go; `lock_path` is where the lockfile backend writes. Every
+/// destination is checked, each file once, and every refusal is collected
+/// before deciding: under `--all`, stopping at the third key would leave two
+/// changed for a reason known from the start, and naming one file at a time
+/// would send the reader round once per file. Warns on stderr when git cannot
+/// say, and passes outside a repository. Callers run it before the first
+/// prompt and before anything is sent to Roblox.
+pub fn check_all(writes: &[(String, Resolved)], lock_path: &Path, write: Write) -> Result<()> {
+    let mut refused: Vec<Refused> = Vec::new();
+    let mut passed: Vec<PathBuf> = Vec::new();
+    for (key, resolved) in writes {
+        let Some(path) = destination(resolved, lock_path) else {
+            continue;
+        };
+        if let Some(r) = refused.iter_mut().find(|r| r.path == path) {
+            r.keys.push(key.clone());
+            continue;
+        }
+        if passed.contains(&path) {
+            continue;
+        }
+        match status_of(&path) {
+            GitStatus::NotARepo | GitStatus::Ignored => passed.push(path),
+            GitStatus::Tracked => refused.push(Refused {
+                path,
+                is_lockfile: resolved.backend == Backend::Lockfile,
+                keys: vec![key.clone()],
+            }),
+            // An unanswerable check is not a verdict: git missing from PATH
+            // is not evidence that the file is safe, nor that it is not.
+            GitStatus::Unknown(why) => {
+                eprintln!(
+                    "warning: could not check whether {} is gitignored ({why}); the key \
+                     secret is stored there in plain text",
+                    path.display()
+                );
+                passed.push(path);
+            }
         }
     }
+    if refused.is_empty() {
+        return Ok(());
+    }
+    bail!(refusal(&refused, write))
 }
 
 /// Whether `path` sits inside a git work tree and, if so, whether git ignores
@@ -235,20 +264,33 @@ fn ignore_line(path: &Path, is_lockfile: bool) -> String {
     }
 }
 
-/// The refusal, worded so the reader can act without opening the docs.
-pub fn refusal(path: &Path, is_lockfile: bool, write: Write) -> String {
+/// The refusal for a whole run, worded so the reader can act without opening
+/// the docs: every file, the keys headed for it, and the lines to add.
+pub fn refusal(refused: &[Refused], write: Write) -> String {
+    let files: Vec<String> = refused
+        .iter()
+        .map(|r| format!("    {} ({})", r.path.display(), r.keys.join(", ")))
+        .collect();
+    let mut lines: Vec<String> = Vec::new();
+    for r in refused {
+        let line = ignore_line(&r.path, r.is_lockfile);
+        if !lines.contains(&line) {
+            lines.push(line);
+        }
+    }
     let mut text = format!(
-        "{} would hold the key secret in plain text, and git is not ignoring it.\n\n\
-         {} would put a live Open Cloud credential one `git add` away from being published, \
+        "These files would hold key secrets in plain text, and git is not ignoring them:\n\n\
+         {}\n\n\
+         {} would put live Open Cloud credentials one `git add` away from being published, \
          which is the one failure this tool exists to prevent. {}\n\n\
-         Add this line to .gitignore, then run the same command again:\n\n    \
+         Add these lines to .gitignore, then run the same command again:\n\n    \
          {}",
-        path.display(),
+        files.join("\n"),
         write.doing(),
         write.nothing(),
-        ignore_line(path, is_lockfile),
+        lines.join("\n    "),
     );
-    if is_lockfile {
+    if refused.iter().any(|r| r.is_lockfile) {
         text.push_str(
             "\n\nOr keep the secret out of the lockfile entirely, which is the better answer for \
              a shared repository:\n\n    \
@@ -339,6 +381,10 @@ pub(crate) mod tests {
         assert_eq!(status_of(&file), GitStatus::Ignored);
     }
 
+    fn one(key: &str, resolved: Resolved) -> Vec<(String, Resolved)> {
+        vec![(key.to_string(), resolved)]
+    }
+
     /// Both destinations through the one entry point the commands use.
     #[test]
     fn check_refuses_either_destination_git_does_not_ignore() {
@@ -346,10 +392,10 @@ pub(crate) mod tests {
         let lock = dir.path().join("rbxapikey.lock.toml");
         let file = dir.path().join(".secrets").join("deploy.env");
 
-        let err = check(&lockfile(), &lock, Write::Rotate).unwrap_err();
+        let err = check_all(&one("deploy", lockfile()), &lock, Write::Rotate).unwrap_err();
         assert!(format!("{err}").contains("rbxapikey.lock.toml"), "{err}");
 
-        let err = check(&secret_file(&file), &lock, Write::Rotate).unwrap_err();
+        let err = check_all(&one("deploy", secret_file(&file)), &lock, Write::Rotate).unwrap_err();
         assert!(format!("{err}").contains("deploy.env"), "{err}");
     }
 
@@ -363,8 +409,31 @@ pub(crate) mod tests {
         let lock = dir.path().join("rbxapikey.lock.toml");
         let file = dir.path().join(".secrets").join("deploy.env");
 
-        check(&secret_file(&file), &lock, Write::Move).unwrap();
-        assert!(check(&lockfile(), &lock, Write::Move).is_err());
+        check_all(&one("deploy", secret_file(&file)), &lock, Write::Move).unwrap();
+        assert!(check_all(&one("deploy", lockfile()), &lock, Write::Move).is_err());
+    }
+
+    /// A run refuses once, listing every file and every key headed for it,
+    /// rather than stopping at the first and leaving the reader to find the
+    /// next one on the next attempt.
+    #[test]
+    fn a_run_is_refused_with_every_refused_key() {
+        let dir = repo();
+        let lock = dir.path().join("rbxapikey.lock.toml");
+        let ci = dir.path().join(".secrets").join("ci.env");
+        let writes = vec![
+            ("deploy".to_string(), lockfile()),
+            ("ci".to_string(), secret_file(&ci)),
+            ("viewer".to_string(), lockfile()),
+            ("vault".to_string(), crate::secret_store::external()),
+        ];
+
+        let text = format!("{}", check_all(&writes, &lock, Write::Create).unwrap_err());
+
+        assert!(text.contains("(deploy, viewer)"), "{text}");
+        assert!(text.contains("ci.env (ci)"), "{text}");
+        assert!(!text.contains("vault"), "{text}");
+        assert_eq!(text.matches("rbxapikey.lock.toml (").count(), 1, "{text}");
     }
 
     /// `--stdout` writes nothing, so there is nothing to refuse even in a
@@ -373,14 +442,27 @@ pub(crate) mod tests {
     fn a_secret_printed_on_stdout_is_never_refused() {
         let dir = repo();
         let lock = dir.path().join("rbxapikey.lock.toml");
-        check(&crate::secret_store::external(), &lock, Write::Create).unwrap();
+        check_all(
+            &one("deploy", crate::secret_store::external()),
+            &lock,
+            Write::Create,
+        )
+        .unwrap();
+    }
+
+    fn refused(path: &str, is_lockfile: bool) -> Refused {
+        Refused {
+            path: PathBuf::from(path),
+            is_lockfile,
+            keys: vec!["deploy".into()],
+        }
     }
 
     /// The refusal has to carry both ways out, since the reader is stopped
     /// mid-task and the docs they would consult are the ones that were wrong.
     #[test]
     fn the_refusal_names_the_line_to_add_and_the_alternative() {
-        let text = refusal(Path::new("rbxapikey.lock.toml"), true, Write::Create);
+        let text = refusal(&[refused("rbxapikey.lock.toml", true)], Write::Create);
         assert!(text.contains("rbxapikey.lock.toml"), "{text}");
         assert!(text.contains("default_secret_file"), "{text}");
         assert!(text.contains("Nothing has been created"), "{text}");
@@ -390,7 +472,7 @@ pub(crate) mod tests {
     /// secret file as the way out of a secret file.
     #[test]
     fn a_secret_file_refusal_names_its_directory() {
-        let text = refusal(Path::new(".secrets/deploy.env"), false, Write::Rotate);
+        let text = refusal(&[refused(".secrets/deploy.env", false)], Write::Rotate);
         assert!(text.contains("\n    .secrets/"), "{text}");
         assert!(!text.contains("default_secret_file"), "{text}");
         assert!(text.contains("Nothing has been rotated"), "{text}");

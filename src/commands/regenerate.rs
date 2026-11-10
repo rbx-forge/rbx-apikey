@@ -35,13 +35,23 @@ pub async fn run(
 
     crate::drift::check_all(&lk, places.as_ref())?;
 
-    let names: Vec<String> = if all {
+    let requested: Vec<String> = if all {
         let mut v: Vec<String> = lk.keys.keys().cloned().collect();
         v.sort();
         if v.is_empty() {
             bail!("no keys in {}", lock::FILE);
         }
+        v
+    } else {
+        vec![name.unwrap().to_string()]
+    };
+    // Every key against git before the first question and the first rotation:
+    // once Roblox answers, the old secret is dead, and a refusal then would
+    // leave the new one with nowhere to go.
+    let requested = checked_against_git(&cfg, &lk, requested, stdout, Path::new(lock::FILE))?;
 
+    let names: Vec<String> = if all {
+        let v = requested;
         say!("About to rotate {} secrets: {}", v.len(), v.join(", "));
         say!(
             "{}",
@@ -59,7 +69,7 @@ pub async fn run(
         }
         v
     } else {
-        let single = name.unwrap().to_string();
+        let single = requested.join(", ");
         // Single-key rotation: confirm once unless --yes. The --all path above
         // has its own explicit "Proceed?" prompt because it lists every key.
         //
@@ -78,7 +88,7 @@ pub async fn run(
             ),
             skip_confirm,
         )?;
-        vec![single]
+        requested
     };
 
     // Before the first rotation. Rotating invalidates the old secret the
@@ -139,6 +149,37 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// The keys of a run, once git has been asked about every secret they would
+/// write; the whole run is refused, naming each refused key, if any of them
+/// would land in a file git is not ignoring.
+///
+/// Returned rather than checked on the side, so the run rotates the list that
+/// was checked. A key with no lockfile entry is skipped by `regenerate_one`,
+/// and a secret printed with `--stdout` reaches no file, so neither is asked
+/// about.
+fn checked_against_git(
+    cfg: &config::Config,
+    lk: &lock::Lock,
+    names: Vec<String>,
+    stdout: bool,
+    lock_path: &Path,
+) -> Result<Vec<String>> {
+    let writes: Vec<(String, secret_store::Resolved)> = names
+        .iter()
+        .filter(|n| lock::get(lk, n).is_some())
+        .map(|n| {
+            let resolved = if stdout {
+                secret_store::external()
+            } else {
+                secret_store::backend_for(cfg, config::get(cfg, n), n)
+            };
+            (n.clone(), resolved)
+        })
+        .collect();
+    git_guard::check_all(&writes, lock_path, git_guard::Write::Rotate)?;
+    Ok(names)
 }
 
 /// What one key's rotation did.
@@ -205,13 +246,8 @@ async fn regenerate_one(
     };
     let backend_changed = secret_store::backend_differs(&previous_resolved, &new_resolved);
 
-    // Before Roblox is asked: once it answers, the old secret is dead, and a
-    // refusal then would leave the new one with nowhere to go.
-    if let Err(e) = git_guard::check(&new_resolved, lock_path, git_guard::Write::Rotate) {
-        say!("{}", format!("\"{}\": {}", name, e).yellow());
-        return Rotation::Untouched;
-    }
-
+    // Where `new_resolved` points was checked against git by `run`, before the
+    // first prompt: see `checked_against_git`.
     say!("Regenerating \"{}\" (id={})...", name, entry.cloud_auth_id);
     let resp = match client.regenerate_secret(&entry.cloud_auth_id).await {
         Ok(r) => r,
@@ -439,64 +475,82 @@ mod tests {
         assert_eq!(outcome, Rotation::Unsaved);
     }
 
-    /// The lockfile is where the rotated secret would go, and git does not
-    /// ignore it. Roblox must not be asked: once it answers, the old secret is
-    /// dead, and refusing then would leave the new one nowhere.
-    #[tokio::test]
-    async fn a_lockfile_git_does_not_ignore_stops_the_rotation_before_roblox() {
-        let dir = git_guard::tests::repo();
-        let lock_path = dir.path().join(lock::FILE);
-        let mut lk = lock_with_key();
-        lock::save_to(&lk, &lock_path).unwrap();
-        let (client, server) = rotating("regenerate-guard-lockfile").await;
-
-        let outcome = regenerate_one(
-            &config::Config::default(),
-            &mut lk,
-            &client,
-            "deploy",
-            true,
-            false,
-            &lock_path,
-        )
-        .await;
-
-        assert_eq!(outcome, Rotation::Untouched);
-        assert!(server.received_requests().await.unwrap().is_empty());
-        let on_disk = lock::load_from(&lock_path).unwrap();
-        assert_eq!(
-            lock::get(&on_disk, "deploy").unwrap().secret.as_deref(),
-            Some("the-old-secret")
-        );
-    }
-
-    /// The same for a `secret_file`, with the lockfile itself ignored: the
-    /// secret does not go into the lockfile, so its file is the one judged.
-    #[tokio::test]
-    async fn a_secret_file_git_does_not_ignore_stops_the_rotation_before_roblox() {
-        let dir = git_guard::tests::repo();
-        std::fs::write(dir.path().join(".gitignore"), "rbxapikey.lock.toml\n").unwrap();
-        let secret_file = dir.path().join(".secrets").join("deploy.env");
-        let config_path = dir.path().join(config::FILE);
+    /// `deploy` in the lockfile, `ci` in `.secrets/ci.env`, both declared in a
+    /// config in `dir` and both in the lockfile.
+    fn two_keys(dir: &Path) -> (config::Config, lock::Lock) {
+        let secret_file = dir.join(".secrets").join("ci.env");
+        let config_path = dir.join(config::FILE);
         std::fs::write(
             &config_path,
             format!(
-                "[keys.deploy]\nscopes = [\"universe:read\"]\nsecret_file = '{}'\n",
+                "[keys.deploy]\nscopes = [\"universe:read\"]\n\n\
+                 [keys.ci]\nscopes = [\"universe:read\"]\nsecret_file = '{}'\n",
                 secret_file.display()
             ),
         )
         .unwrap();
-        let cfg = config::load_from(&config_path).unwrap();
-        let lock_path = dir.path().join(lock::FILE);
         let mut lk = lock_with_key();
-        let (client, server) = rotating("regenerate-guard-secret-file").await;
+        let mut ci = lock::get(&lk, "deploy").unwrap().clone();
+        ci.secret = None;
+        ci.secret_file = Some(secret_file.to_string_lossy().to_string());
+        lock::set(&mut lk, "ci", ci);
+        (config::load_from(&config_path).unwrap(), lk)
+    }
 
-        let outcome =
-            regenerate_one(&cfg, &mut lk, &client, "deploy", true, false, &lock_path).await;
+    fn names(n: &[&str]) -> Vec<String> {
+        n.iter().map(|s| s.to_string()).collect()
+    }
 
-        assert_eq!(outcome, Rotation::Untouched);
-        assert!(server.received_requests().await.unwrap().is_empty());
-        assert!(!secret_file.try_exists().unwrap(), "nothing was written");
+    /// The lockfile is where the rotated secret would go, and git does not
+    /// ignore it. The run stops before its first question: once Roblox
+    /// answers, the old secret is dead, and refusing then would leave the new
+    /// one nowhere.
+    #[test]
+    fn a_lockfile_git_does_not_ignore_stops_the_rotation() {
+        let dir = git_guard::tests::repo();
+        std::fs::write(dir.path().join(".gitignore"), ".secrets/\n").unwrap();
+        let (cfg, lk) = two_keys(dir.path());
+        let lock_path = dir.path().join(lock::FILE);
+
+        let err =
+            checked_against_git(&cfg, &lk, names(&["deploy"]), false, &lock_path).unwrap_err();
+        assert!(
+            format!("{err}").contains("Nothing has been rotated"),
+            "{err}"
+        );
+        checked_against_git(&cfg, &lk, names(&["ci"]), false, &lock_path).unwrap();
+        // `--stdout` writes nothing to refuse.
+        checked_against_git(&cfg, &lk, names(&["deploy"]), true, &lock_path).unwrap();
+    }
+
+    /// The same for a `secret_file`, with the lockfile itself ignored: the
+    /// secret does not go into the lockfile, so its file is the one judged.
+    #[test]
+    fn a_secret_file_git_does_not_ignore_stops_the_rotation() {
+        let dir = git_guard::tests::repo();
+        std::fs::write(dir.path().join(".gitignore"), "rbxapikey.lock.toml\n").unwrap();
+        let (cfg, lk) = two_keys(dir.path());
+        let lock_path = dir.path().join(lock::FILE);
+
+        let err = checked_against_git(&cfg, &lk, names(&["ci"]), false, &lock_path).unwrap_err();
+        assert!(format!("{err}").contains("ci.env"), "{err}");
+        checked_against_git(&cfg, &lk, names(&["deploy"]), false, &lock_path).unwrap();
+    }
+
+    /// `--all` is refused as a whole, naming every refused key, before the
+    /// "Proceed?" question.
+    #[test]
+    fn regenerate_all_names_every_refused_key() {
+        let dir = git_guard::tests::repo();
+        let (cfg, lk) = two_keys(dir.path());
+        let lock_path = dir.path().join(lock::FILE);
+
+        let err = checked_against_git(&cfg, &lk, names(&["ci", "deploy"]), false, &lock_path)
+            .unwrap_err();
+
+        let text = format!("{err}");
+        assert!(text.contains("(deploy)"), "{text}");
+        assert!(text.contains("ci.env (ci)"), "{text}");
     }
 
     /// The bug this exists for: `Old secrets invalid as of <now>` printed after

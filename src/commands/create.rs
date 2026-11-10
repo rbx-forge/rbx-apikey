@@ -61,25 +61,30 @@ pub async fn run(
     }
 
     let cfg = config::load()?;
-    // Before anything is created on Roblox: a secret about to be written into
-    // a file git will happily commit is the one failure this tool must not
-    // ship. Checked here rather than at write time, because refusing after
-    // creation leaves a live key whose secret was never stored. Under
-    // `--stdout` nothing secret reaches the disk, so there is nothing to guard.
-    // The picker below checks what it picked, once it knows.
-    if !stdout && (all || name.is_some()) {
-        let names: Vec<String> = match name {
-            Some(n) => vec![n.to_string()],
-            None => cfg.keys.keys().cloned().collect(),
-        };
-        refuse_if_a_secret_would_be_committed(&cfg, &names, Path::new(lock::FILE))?;
-    }
     let mut lk = lock::load()?;
+    let lock_path = Path::new(lock::FILE);
+    // The keys asked for by name or `--all`, checked against git before the
+    // first prompt and before anything is created on Roblox: refusing after
+    // creation leaves a live key whose secret was never stored. The picker
+    // below checks what it picked, once it knows.
+    let requested: Option<Vec<String>> = if all {
+        let mut names: Vec<String> = cfg.keys.keys().cloned().collect();
+        names.sort();
+        if names.is_empty() {
+            bail!("no keys in {}", config::FILE);
+        }
+        Some(checked_against_git(
+            &cfg, &lk, names, force, stdout, lock_path,
+        )?)
+    } else {
+        name.map(|n| checked_against_git(&cfg, &lk, vec![n.to_string()], force, stdout, lock_path))
+            .transpose()?
+    };
     let places = super::load_places(global)?;
     let client = make_client(global);
 
     // No args → interactive picker over keys not yet in lock.
-    if !all && name.is_none() {
+    let Some(names) = requested else {
         let mut candidates: Vec<String> = cfg
             .keys
             .keys()
@@ -108,7 +113,7 @@ pub async fn run(
             .into_iter()
             .map(|i| candidates[i].clone())
             .collect();
-        refuse_if_a_secret_would_be_committed(&cfg, &chosen, Path::new(lock::FILE))?;
+        let chosen = checked_against_git(&cfg, &lk, chosen, false, false, lock_path)?;
 
         if no_ip {
             say!("{}", "--no-ip: keys accept calls from any IP".yellow());
@@ -135,7 +140,7 @@ pub async fn run(
             lock::save(&lk)?;
         }
         return Ok(());
-    }
+    };
 
     if no_ip {
         say!("{}", "--no-ip: key accepts calls from any IP".yellow());
@@ -151,11 +156,6 @@ pub async fn run(
     confirm_creator(&account, &what, yes)?;
 
     if all {
-        let mut names: Vec<String> = cfg.keys.keys().cloned().collect();
-        names.sort();
-        if names.is_empty() {
-            bail!("no keys in {}", config::FILE);
-        }
         say!(
             "Creating keys for {} entries: {}",
             names.len(),
@@ -178,21 +178,22 @@ pub async fn run(
             lock::save(&lk)?;
         }
     } else {
-        let n = name.unwrap();
-        create_one(
-            &cfg,
-            places.as_ref(),
-            &mut lk,
-            &client,
-            n,
-            creator_id,
-            no_ip,
-            force,
-            skip_verify,
-            stdout,
-        )
-        .await?;
-        lock::save(&lk)?;
+        for n in &names {
+            create_one(
+                &cfg,
+                places.as_ref(),
+                &mut lk,
+                &client,
+                n,
+                creator_id,
+                no_ip,
+                force,
+                skip_verify,
+                stdout,
+            )
+            .await?;
+            lock::save(&lk)?;
+        }
     }
 
     Ok(())
@@ -370,34 +371,37 @@ async fn create_one(
     Ok(())
 }
 
-/// Stop before creating anything if any of these keys' secrets would land in
-/// a file git is not ignoring.
+/// The keys of a run, once git has been asked about every secret they would
+/// write; the whole run is refused, naming each refused key, if any of them
+/// would land in a file git is not ignoring.
 ///
-/// Every key's own destination, the lockfile or its `secret_file`, and all of
-/// them before the first key is created: under `--all`, a refusal on the third
-/// key after two were created would be a run half done for a reason known
-/// from the start. Each file is checked once, however many keys share it.
-fn refuse_if_a_secret_would_be_committed(
+/// Returned rather than checked on the side, so the run creates the list that
+/// was checked. Only the keys `create_one` would write for are asked about: a
+/// name the config does not declare, or a key already in the lockfile without
+/// `--force`, is skipped there. Under `--stdout` nothing reaches the disk.
+fn checked_against_git(
     cfg: &config::Config,
-    names: &[String],
+    lk: &lock::Lock,
+    names: Vec<String>,
+    force: bool,
+    stdout: bool,
     lock_path: &Path,
-) -> Result<()> {
-    let mut seen = BTreeSet::new();
-    for name in names {
-        // A name the config does not declare is skipped by `create_one`, so
-        // nothing would be written for it.
-        let Some(key_cfg) = config::get(cfg, name) else {
-            continue;
-        };
-        let resolved = secret_store::backend_for(cfg, Some(key_cfg), name);
-        let Some(path) = git_guard::destination(&resolved, lock_path) else {
-            continue;
-        };
-        if seen.insert(path) {
-            git_guard::check(&resolved, lock_path, git_guard::Write::Create)?;
-        }
-    }
-    Ok(())
+) -> Result<Vec<String>> {
+    let writes: Vec<(String, secret_store::Resolved)> = names
+        .iter()
+        .filter(|n| force || lock::get(lk, n).is_none())
+        .filter_map(|n| {
+            let key_cfg = config::get(cfg, n)?;
+            let resolved = if stdout {
+                secret_store::external()
+            } else {
+                secret_store::backend_for(cfg, Some(key_cfg), n)
+            };
+            Some((n.clone(), resolved))
+        })
+        .collect();
+    git_guard::check_all(&writes, lock_path, git_guard::Write::Create)?;
+    Ok(names)
 }
 
 /// The permissions a set of scope entries grants, as comparable triples.
@@ -548,13 +552,73 @@ mod tests {
         let cfg = two_destinations(dir.path());
         let lock_path = dir.path().join(lock::FILE);
 
-        let err = refuse_if_a_secret_would_be_committed(&cfg, &["deploy".into()], &lock_path)
-            .unwrap_err();
+        let lk = lock::Lock::default();
+        let check = |names: &[&str]| {
+            let names = names.iter().map(|n| n.to_string()).collect();
+            checked_against_git(&cfg, &lk, names, false, false, &lock_path)
+        };
+
+        let err = check(&["deploy"]).unwrap_err();
         assert!(
             format!("{err}").contains("Nothing has been created"),
             "{err}"
         );
-        refuse_if_a_secret_would_be_committed(&cfg, &["ci".into()], &lock_path).unwrap();
+        assert_eq!(check(&["ci"]).unwrap(), vec!["ci".to_string()]);
+    }
+
+    /// `--all` is refused as a whole, naming every key that was refused and
+    /// not just the first: one file per attempt would send the reader round
+    /// once per file.
+    #[test]
+    fn create_all_names_every_refused_key() {
+        let dir = git_guard::tests::repo();
+        let cfg = two_destinations(dir.path());
+        let lock_path = dir.path().join(lock::FILE);
+        let names = vec!["ci".to_string(), "deploy".to_string()];
+
+        let err = checked_against_git(
+            &cfg,
+            &lock::Lock::default(),
+            names,
+            false,
+            false,
+            &lock_path,
+        )
+        .unwrap_err();
+
+        let text = format!("{err}");
+        assert!(text.contains("(deploy)"), "{text}");
+        assert!(text.contains("ci.env (ci)"), "{text}");
+    }
+
+    /// A key already in the lockfile is skipped without `--force`, so nothing
+    /// is written for it and nothing about it is refused. `--stdout` writes
+    /// nothing either.
+    #[test]
+    fn a_key_that_will_not_be_written_is_not_refused() {
+        let dir = git_guard::tests::repo();
+        let cfg = two_destinations(dir.path());
+        let lock_path = dir.path().join(lock::FILE);
+        let mut lk = lock::Lock::default();
+        lock::set(
+            &mut lk,
+            "deploy",
+            lock::LockEntry {
+                cloud_auth_id: "aaaaBBBBccccDDDD".into(),
+                secret: Some("not-a-real-secret".into()),
+                secret_file: None,
+                secret_external: false,
+                creator_id: 1234567890,
+                is_enabled: true,
+                created_at: "now".into(),
+                expires_at: None,
+            },
+        );
+        let deploy = || vec!["deploy".to_string()];
+
+        checked_against_git(&cfg, &lk, deploy(), false, false, &lock_path).unwrap();
+        assert!(checked_against_git(&cfg, &lk, deploy(), true, false, &lock_path).is_err());
+        checked_against_git(&cfg, &lk, deploy(), true, true, &lock_path).unwrap();
     }
 
     /// A `secret_file` git does not ignore, which `create` used to pass on the
@@ -567,14 +631,15 @@ mod tests {
         let cfg = two_destinations(dir.path());
         let lock_path = dir.path().join(lock::FILE);
 
-        let err = refuse_if_a_secret_would_be_committed(
-            &cfg,
-            &["deploy".into(), "ci".into()],
-            &lock_path,
-        )
-        .unwrap_err();
+        let lk = lock::Lock::default();
+        let check = |names: &[&str]| {
+            let names = names.iter().map(|n| n.to_string()).collect();
+            checked_against_git(&cfg, &lk, names, false, false, &lock_path)
+        };
+
+        let err = check(&["deploy", "ci"]).unwrap_err();
         assert!(format!("{err}").contains("ci.env"), "{err}");
-        refuse_if_a_secret_would_be_committed(&cfg, &["deploy".into()], &lock_path).unwrap();
+        check(&["deploy"]).unwrap();
     }
 
     /// The skipped-introspect line reported "introspecting the key" and
