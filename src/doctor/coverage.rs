@@ -75,13 +75,17 @@ pub const REQUIREMENTS: &[ToolRequirements] = &[
         config_file: "rbxmeta.toml",
         tool: "metadata",
         operations: &[
+            // The write scopes only. A sync reads the universe and the place
+            // before it writes them, and Roblox answers GET universe and GET
+            // place without `universe:read` or `universe.place:read` (measured
+            // on 2026-11-10). Requiring them failed a key the sync runs with.
             Operation {
                 what: "sync universe fields",
-                scopes: &[("universe", "read"), ("universe", "write")],
+                scopes: &[("universe", "write")],
             },
             Operation {
                 what: "sync place fields",
-                scopes: &[("universe.place", "read"), ("universe.place", "write")],
+                scopes: &[("universe.place", "write")],
             },
             Operation {
                 what: "sync icons & thumbnails",
@@ -252,6 +256,25 @@ mod tests {
                     assert!(!operation.contains(','), "{operation} has a comma");
                 }
             }
+        }
+    }
+
+    /// Roblox answers GET universe and GET place without `universe:read` or
+    /// `universe.place:read`, so a metadata sync runs on the write scopes
+    /// alone. Requiring the reads failed a key the sync works with.
+    #[test]
+    fn metadata_sync_needs_only_the_write_scopes() {
+        let meta = REQUIREMENTS
+            .iter()
+            .find(|r| r.config_file == "rbxmeta.toml")
+            .unwrap();
+        for what in ["sync universe fields", "sync place fields"] {
+            let op = meta.operations.iter().find(|o| o.what == what).unwrap();
+            assert!(
+                op.scopes.iter().all(|(_, operation)| *operation == "write"),
+                "{what} requires {:?}",
+                op.scopes
+            );
         }
     }
 

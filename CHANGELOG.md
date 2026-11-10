@@ -8,6 +8,7 @@
 - An `rbxplace.toml`, an `rbxapikey.toml` or a lockfile that is there and cannot be looked at stops the command, naming the file. Each read as absent somewhere: the env file switched the drift check off without a word, the config was reported missing with advice to create it, and `list --remote` and `doctor` showed every key of the project as untracked. `doctor` also stops on a config or lockfile it cannot read or parse, which it used to report as a directory declaring no keys.
 - A secret file that is there and cannot be looked at or read stops the command, naming the file. It read as a missing secret: `update` reported it "not found" and sent the reader to rotate a key whose secret was fine, and `status` and `list` showed `SECRET_MISSING`.
 - `doctor`'s read probe no longer claims to need `universe:read`. Roblox answers GET universe and GET place without `universe:read` or `universe.place:read`, so a pass now says it tested no scope, a 403 is no longer explained as a missing scope, and the note warning that a key without `universe:read` could not run the probe is gone.
+- `doctor`'s scope coverage asks only for `universe:write` to sync universe fields and `universe.place:write` to sync place fields. It also required `universe:read` and `universe.place:read`, which Roblox does not check on those reads, and failed a key the sync works with.
 
 ## [0.1.2] - 2026-11-10
 
