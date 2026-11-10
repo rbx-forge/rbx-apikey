@@ -8,7 +8,7 @@ default_secret_file = ".secrets/{name}.env"
 ```
 
 !!! warning "Gitignore it"
-    Nothing here edits your `.gitignore`. Every command that writes a secret refuses to write it into a file git is not ignoring, and names the line to add: `create` for a new key, `regenerate` for a rotated secret, `update` when a changed `secret_file` moves one. The lockfile and a secret file are checked alike, and the check runs before Roblox is asked, so a refusal leaves the key and its secret as they were. When git cannot answer (not installed, or a directory it cannot look at), a warning says so and the write goes ahead.
+    Nothing here edits your `.gitignore`. Every command that writes a secret refuses to write it into a file git is not ignoring, and names the line to add: `create` for a new key, `regenerate` for a rotated secret, `update` when a changed `secret_file` moves one. The lockfile and a secret file are checked alike, for every key of the run, before the first question and before Roblox is asked. One refused key refuses the whole run, and the message names every refused file with its keys, so nothing has changed when it stops. When git cannot answer (not installed, or a directory it cannot look at), a warning says so and the write goes ahead.
 
 Both the lockfile and secret files are written readable by your account only: mode `0600` on Linux and macOS, inherited access removed on Windows (through `icacls`) before the secret is written. If that fails on Windows, a warning names the file and the write goes ahead: check who can read it. This matters most on a drive outside your profile, which usually grants every authenticated user.
 
