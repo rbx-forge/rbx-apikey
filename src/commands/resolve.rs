@@ -20,7 +20,7 @@ pub fn run(name: &str) -> Result<()> {
     })?;
 
     let resolved = secret_store::stored_backend(&cfg, key_cfg, name, Some(entry));
-    let secret = secret_store::read(&resolved, Some(entry));
+    let secret = secret_store::read(&resolved, Some(entry))?;
     let secret = match secret {
         Some(s) => s,
         None => match resolved.backend {

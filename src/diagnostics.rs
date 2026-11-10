@@ -68,8 +68,7 @@ fn declared_keys_in(config_path: &Path, lock_path: &Path) -> Result<Vec<Declared
     let cfg = config::load_from(config_path)?;
     let lk = lock::load_from(lock_path)?;
 
-    Ok(cfg
-        .keys
+    cfg.keys
         .keys()
         .map(|name| {
             let key_cfg = config::get(&cfg, name);
@@ -80,14 +79,14 @@ fn declared_keys_in(config_path: &Path, lock_path: &Path) -> Result<Vec<Declared
                 secret_store::Backend::File => format!("file: {}", resolved.target),
                 secret_store::Backend::External => resolved.target.clone(),
             };
-            DeclaredKey {
+            Ok(DeclaredKey {
                 name: name.clone(),
                 cloud_auth_id: entry.map(|e| e.cloud_auth_id.clone()),
-                secret: secret_store::read(&resolved, entry),
+                secret: secret_store::read(&resolved, entry)?,
                 secret_origin,
-            }
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Whether the config file this project uses for keys is even here.

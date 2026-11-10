@@ -132,7 +132,7 @@ pub async fn run(global: &GlobalFlags, remote_check: bool, format: OutputFormat)
             (None, None) => continue, // shouldn't happen since name_set unions them.
             (Some(entry), Some(_)) => {
                 let resolved = secret_store::stored_backend(&cfg, key_cfg, name, Some(entry));
-                let secret = secret_store::read(&resolved, Some(entry));
+                let secret = secret_store::read(&resolved, Some(entry))?;
                 // Printed with --stdout: held elsewhere on purpose, not missing.
                 let held_elsewhere = resolved.backend == secret_store::Backend::External;
 
