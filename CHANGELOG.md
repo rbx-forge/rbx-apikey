@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `update --all` records each key in the lockfile as soon as Roblox has taken its update. It saved once at the end, so a refusal or a "no" on a later key lost the record of the keys already updated, including where a migrated secret had moved to after its old file was deleted.
+- `prune` stops on a config or a lockfile it cannot read. It read either as empty, which labelled every key of the project UNTRACKED and deleted it without its record, then overwrote the unreadable lockfile with an empty one. It also leaves no lockfile behind when no tracked key was deleted.
+
 ## [0.1.1] - 2026-11-09
 
 ### Security

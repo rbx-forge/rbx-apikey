@@ -1,5 +1,7 @@
 //! `rbx-apikey update <key>|--all`: re-apply key config from rbxapikey.toml.
 
+use std::path::Path;
+
 use anyhow::{bail, Result};
 use colored::Colorize;
 use dialoguer::Confirm;
@@ -51,6 +53,8 @@ pub async fn run(
     // not". One cached call, see `RbxApiKeyClient::require_valid_session`.
     client.require_valid_session().await?;
 
+    // No save after the loop: each key records itself as soon as Roblox has
+    // taken its update. See `update_one`.
     for n in &names {
         update_one(
             &cfg,
@@ -61,11 +65,11 @@ pub async fn run(
             no_ip,
             clean_files,
             skip_confirm,
+            Path::new(lock::FILE),
         )
         .await?;
     }
 
-    lock::save(&lk)?;
     Ok(())
 }
 
@@ -79,6 +83,7 @@ async fn update_one(
     no_ip: bool,
     clean_files: bool,
     skip_confirm: bool,
+    lock_path: &Path,
 ) -> Result<()> {
     let entry = match lock::get(lk, name).cloned() {
         Some(e) => e,
@@ -205,6 +210,12 @@ async fn update_one(
         lk.envs.insert(env_name, lock_env);
     }
     lock::set(lk, name, entry);
+    // On disk now, and not after the last key of an `--all`. Roblox already
+    // carries this key's new config, and a migrated secret is about to lose
+    // its old file below. Saved once at the end, a refusal or a "no" on a
+    // later key threw this record away with the run: a lockfile still pointing
+    // at a secret file that had just been deleted.
+    lock::save_to(lk, lock_path)?;
 
     say!(
         "{}",
@@ -297,4 +308,113 @@ pub(crate) fn build_cidrs(
         "\"{}\" has no allowed_cidrs. Either:\n  - Add allowed_cidrs to the key in rbxapikey.toml\n  - Add default_allowed_cidrs to [settings] in rbxapikey.toml\n  - Use --no-ip to allow all IPs",
         name
     );
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::lock::LockEntry;
+    use serde_json::json;
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Two keys, both to be disabled by the update, so a key the run has
+    /// reached reads `is_enabled = false` in the lockfile.
+    const CONFIG: &str = r#"
+[settings]
+default_allowed_cidrs = ["203.0.113.0/24"]
+default_enabled = false
+
+[keys.first]
+scopes = ["universe:read"]
+
+[keys.second]
+scopes = ["universe:read"]
+"#;
+
+    const CREATOR: u64 = 1234567890;
+
+    fn entry(id: &str) -> LockEntry {
+        LockEntry {
+            cloud_auth_id: id.into(),
+            secret: Some("not-a-real-secret".into()),
+            secret_file: None,
+            secret_external: false,
+            creator_id: CREATOR,
+            is_enabled: true,
+            created_at: "now".into(),
+            expires_at: None,
+        }
+    }
+
+    /// `--all` walks the keys one at a time. Roblox takes the first update and
+    /// refuses the second. The record of the first has to be on disk by then:
+    /// saved once after the loop, it went with the run, and the lockfile kept
+    /// describing a key Roblox no longer held that way.
+    #[tokio::test]
+    async fn a_key_already_updated_is_on_disk_when_a_later_one_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(config::FILE);
+        std::fs::write(&config_path, CONFIG).unwrap();
+        let cfg = config::load_from(&config_path).unwrap();
+
+        let lock_path = dir.path().join(lock::FILE);
+        let mut lk = lock::Lock::default();
+        lock::set(&mut lk, "first", entry("id-first"));
+        lock::set(&mut lk, "second", entry("id-second"));
+        lock::save_to(&lk, &lock_path).unwrap();
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/users/authenticated"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "id": CREATOR, "name": "someone" })),
+            )
+            .mount(&server)
+            .await;
+        // Mounted first, so it answers the second key's update: wiremock takes
+        // the earliest matching mock.
+        Mock::given(method("PATCH"))
+            .and(path("/cloud-authentication/v1/apiKey"))
+            .and(body_partial_json(json!({ "cloudAuthId": "id-second" })))
+            .respond_with(ResponseTemplate::new(400).set_body_string("refused"))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/cloud-authentication/v1/apiKey"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "cloudAuthInfo": { "id": "id-first" } })),
+            )
+            .mount(&server)
+            .await;
+        let client = RbxApiKeyClient::new(Some("update-all-refused".to_string()))
+            .with_base_url(server.uri())
+            .with_users_base_url(server.uri());
+        client.require_valid_session().await.unwrap();
+
+        update_one(
+            &cfg, None, &mut lk, &client, "first", false, false, true, &lock_path,
+        )
+        .await
+        .expect("the first key is updated");
+        update_one(
+            &cfg, None, &mut lk, &client, "second", false, false, true, &lock_path,
+        )
+        .await
+        .expect_err("Roblox refuses the second");
+
+        let on_disk = lock::load_from(&lock_path).unwrap();
+        assert!(
+            !lock::get(&on_disk, "first").unwrap().is_enabled,
+            "the first key's update is recorded"
+        );
+        assert!(
+            lock::get(&on_disk, "second").unwrap().is_enabled,
+            "the refused key's record is as it was"
+        );
+    }
 }

@@ -9,6 +9,8 @@
 //! Hence: nothing is ever preselected, there is no `--all`, and every entry
 //! says plainly whether this project owns it.
 
+use std::path::Path;
+
 use anyhow::{bail, Result};
 use colored::Colorize;
 use dialoguer::{Confirm, MultiSelect};
@@ -28,8 +30,7 @@ pub struct PruneOptions {
 }
 
 pub async fn run(global: &GlobalFlags, opts: PruneOptions) -> Result<()> {
-    let cfg = config::load().unwrap_or_default();
-    let mut lk = lock::load().unwrap_or_default();
+    let (cfg, mut lk) = load_local(Path::new(config::FILE), Path::new(lock::FILE))?;
     let client = make_client(global);
 
     let whoami = client.authenticated_account().await?;
@@ -126,12 +127,14 @@ pub async fn run(global: &GlobalFlags, opts: PruneOptions) -> Result<()> {
     }
 
     let mut failures = 0usize;
+    let mut lock_touched = false;
     for action in plan(&chosen) {
         match action {
             // Reuses the ordinary delete path so the lockfile entry and the
             // stored secret go with the key. A bare remote delete would leave
             // a lockfile pointing at nothing and an orphan secret on disk.
             PruneAction::Tracked { lock_name } => {
+                lock_touched = true;
                 let done = super::delete::delete_one(
                     &cfg,
                     &mut lk,
@@ -156,14 +159,36 @@ pub async fn run(global: &GlobalFlags, opts: PruneOptions) -> Result<()> {
     }
 
     // Untracked keys leave nothing behind locally: we never stored their
-    // secrets, so there is nothing to clean beyond the lockfile writes the
-    // tracked branch already made.
-    lock::save(&lk)?;
+    // secrets. So the lockfile is written only when a tracked key went, which
+    // also keeps a prune run outside any project from leaving an empty
+    // lockfile behind.
+    if lock_touched {
+        lock::save(&lk)?;
+    }
 
     if failures > 0 {
         bail!("{} key(s) could not be deleted", failures);
     }
     Ok(())
+}
+
+/// The project's config and lockfile, for telling its keys from everybody
+/// else's.
+///
+/// A file that is not there is the ordinary case of a prune run outside a
+/// project: nothing is tracked. A file that is there and cannot be read is a
+/// different thing, and reading it as empty was how every key of the project
+/// came to be labelled UNTRACKED, deleted without its record, and the
+/// unreadable lockfile then overwritten with an empty one.
+fn load_local(config_path: &Path, lock_path: &Path) -> Result<(config::Config, lock::Lock)> {
+    let cfg = if config_path.exists() {
+        config::load_from(config_path)?
+    } else {
+        config::Config::default()
+    };
+    // `load_from` already answers an absent lockfile with an empty one.
+    let lk = lock::load_from(lock_path)?;
+    Ok((cfg, lk))
 }
 
 /// What a selected key gets: the lockfile-aware delete, or a bare remote one.
@@ -245,6 +270,53 @@ mod tests {
                 name: "somebody_elses".to_string()
             }]
         );
+    }
+
+    /// Outside a project there is no file at all, and that is not an error:
+    /// nothing is tracked, and every key on the account is somebody else's.
+    #[test]
+    fn no_file_at_all_means_nothing_is_tracked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let (_cfg, lk) = load_local(&dir.path().join(config::FILE), &dir.path().join(lock::FILE))
+            .expect("an absent file is the ordinary case");
+
+        assert!(lk.keys.is_empty());
+    }
+
+    /// The failure this guards. Read as empty, an unreadable lockfile made
+    /// every key of the project UNTRACKED: deleted without its record, and the
+    /// file then overwritten with an empty one, past any repair.
+    #[test]
+    fn a_lockfile_that_cannot_be_read_stops_the_prune() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock_path = dir.path().join(lock::FILE);
+        std::fs::write(&lock_path, "version = 4\n[keys.deploy\n").expect("write");
+
+        let err = load_local(&dir.path().join(config::FILE), &lock_path)
+            .expect_err("a lockfile that does not parse is not an empty one");
+
+        assert!(
+            format!("{err:#}").contains(lock::FILE),
+            "names the file: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).expect("read"),
+            "version = 4\n[keys.deploy\n",
+            "and leaves it as it was"
+        );
+    }
+
+    #[test]
+    fn a_config_that_cannot_be_read_stops_the_prune_too() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join(config::FILE);
+        std::fs::write(&config_path, "[keys.deploy\n").expect("write");
+
+        let err = load_local(&config_path, &dir.path().join(lock::FILE))
+            .expect_err("a config that does not parse is not an empty one");
+
+        assert!(format!("{err:#}").contains(config::FILE), "{err:#}");
     }
 
     #[test]
