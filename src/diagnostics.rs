@@ -39,6 +39,11 @@ pub struct DeclaredKey {
     /// declared key with no readable secret is the normal state after a fresh
     /// clone, not an error.
     pub secret: Option<String>,
+    /// Why the secret could not be read, when its file is there and could not
+    /// be looked at or opened. A finding about this key, not a reason to stop
+    /// the diagnosis: `doctor` is often asked about `RBX_API_KEY`, which this
+    /// file has nothing to do with.
+    pub secret_error: Option<String>,
 }
 
 impl DeclaredKey {
@@ -68,7 +73,8 @@ fn declared_keys_in(config_path: &Path, lock_path: &Path) -> Result<Vec<Declared
     let cfg = config::load_from(config_path)?;
     let lk = lock::load_from(lock_path)?;
 
-    cfg.keys
+    Ok(cfg
+        .keys
         .keys()
         .map(|name| {
             let key_cfg = config::get(&cfg, name);
@@ -79,14 +85,19 @@ fn declared_keys_in(config_path: &Path, lock_path: &Path) -> Result<Vec<Declared
                 secret_store::Backend::File => format!("file: {}", resolved.target),
                 secret_store::Backend::External => resolved.target.clone(),
             };
-            Ok(DeclaredKey {
+            let (secret, secret_error) = match secret_store::read(&resolved, entry) {
+                Ok(secret) => (secret, None),
+                Err(e) => (None, Some(format!("{e:#}"))),
+            };
+            DeclaredKey {
                 name: name.clone(),
                 cloud_auth_id: entry.map(|e| e.cloud_auth_id.clone()),
-                secret: secret_store::read(&resolved, entry)?,
+                secret,
+                secret_error,
                 secret_origin,
-            })
+            }
         })
-        .collect()
+        .collect())
 }
 
 /// Whether the config file this project uses for keys is even here.
@@ -375,6 +386,35 @@ mod tests {
         assert!(declared_keys_in(&absent, &lock_path)
             .expect("absent")
             .is_empty());
+    }
+
+    /// A secret file that cannot be read is recorded on its key and the list
+    /// still comes back: `doctor` reports it and goes on, since the key it
+    /// diagnoses is often `RBX_API_KEY` and not this one.
+    #[test]
+    fn an_unreadable_secret_file_is_recorded_on_its_key() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        // A directory where the secret file belongs: there, and unreadable
+        // as a file.
+        let secret_file = dir.path().join("ci.env");
+        std::fs::create_dir(&secret_file).expect("a directory");
+        let config_path = dir.path().join(config::FILE);
+        std::fs::write(
+            &config_path,
+            format!(
+                "[keys.ci]\nscopes = [\"universe:read\"]\nsecret_file = '{}'\n",
+                secret_file.display()
+            ),
+        )
+        .expect("a config");
+
+        let keys = declared_keys_in(&config_path, &dir.path().join(lock::FILE))
+            .expect("the list comes back");
+
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].secret.is_none());
+        let why = keys[0].secret_error.as_deref().expect("the reason is kept");
+        assert!(why.contains("ci.env"), "{why}");
     }
 
     /// The two lookups by account listing. A lockfile that cannot be looked

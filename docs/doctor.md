@@ -52,7 +52,7 @@ Exits `1` if a check failed, `0` otherwise. The summary counts checks that could
 
 ## The checks
 
-1. **Which credential.** From `--api-key`, `RBX_API_KEY` or `--key`. `RBX_API_KEY` is shared by every tool, so a key from another project is a common cause of refusals. The cookie's source is shown too, and its session is checked.
+1. **Which credential.** From `--api-key`, `RBX_API_KEY` or `--key`. `RBX_API_KEY` is shared by every tool, so a key from another project is a common cause of refusals. The cookie's source is shown too, and its session is checked. A declared key whose secret file is there and cannot be read is reported on that key, and the diagnosis goes on.
 2. **Key validity.** The loaded secret is matched against the account's keys by Roblox's secret preview, then enabled and expiry are reported (a warning under two weeks). Needs the cookie.
 3. **IP allowlist.** The stored ranges are always printed: a stale one fails as an opaque `401`, like a wrong key. With `--check-ip`, one request to `https://api.ipify.org` learns this machine's address and compares. An unanswered lookup, or an address family the list lacks, is reported as not checked, never as a mismatch.
 4. **Scope coverage.** For each of `rbxplace.toml`, `rbxmeta.toml`, `rbxconfig.toml`, `rbxrtbf.toml` and `rbxshop.toml` present, whether the key has the scopes that tool's operations need. Based on the file being present, not its content, and on scope type and operation, not target. Syncing universe and place fields asks only for `universe:write` and `universe.place:write`: Roblox reads a universe and a place without `universe:read` or `universe.place:read`.
