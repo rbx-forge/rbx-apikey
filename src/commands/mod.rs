@@ -12,7 +12,7 @@ pub mod scopes;
 pub mod status;
 pub mod update;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::api::RbxApiKeyClient;
 use crate::config;
@@ -151,9 +151,15 @@ pub fn make_client(global: &GlobalFlags) -> RbxApiKeyClient {
 ///
 /// Absent is not an error here: a key that names its universes by id needs no
 /// env file, and the one that names an env says so when it is resolved. A file
-/// that exists and does not parse is still an error.
+/// that exists and does not parse is still an error, and so is one that cannot
+/// be looked at: read as absent, it switched the drift check off without a
+/// word, since there was no env file to compare the lockfile against.
 pub fn load_places(global: &GlobalFlags) -> Result<Option<PlacesFile>> {
-    if !global.places.exists() {
+    let there = global
+        .places
+        .try_exists()
+        .with_context(|| format!("failed to look at {}", global.places.display()))?;
+    if !there {
         return Ok(None);
     }
     PlacesFile::load(&global.places).map(Some)
@@ -182,6 +188,26 @@ mod tests {
             universe_id: None,
             place_id: Vec::new(),
         }
+    }
+
+    /// An `rbxplace.toml` that cannot be looked at stops the command, naming
+    /// it. Read as absent, the drift check had nothing to compare against
+    /// and skipped without a word.
+    #[test]
+    fn an_env_file_that_cannot_be_looked_at_is_not_an_absent_one() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut global = flags(true);
+        global.places = crate::test_support::unlookable(dir.path());
+
+        let err = match load_places(&global) {
+            Ok(_) => panic!("an env file that cannot be looked at is not absent"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("failed to look at"), "got: {err}");
+
+        // And an absent one is still no env file at all.
+        global.places = dir.path().join("rbxplace.toml");
+        assert!(load_places(&global).expect("absent is fine").is_none());
     }
 
     /// `--no-auto-cookie`, from this side. `resolve_cookie` owns the whole

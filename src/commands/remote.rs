@@ -5,9 +5,12 @@
 //! Neither can see a key the project never created, which is most of them on a
 //! real account. This is the view that can.
 
+use std::path::Path;
+
 use anyhow::Result;
 use colored::Colorize;
 
+use crate::api::RbxApiKeyClient;
 use crate::json::RemoteListDocument;
 use crate::{lock, remote_view};
 use rbx_core::output::{emit, OutputFormat};
@@ -16,8 +19,26 @@ use rbx_core::GlobalFlags;
 use super::make_client;
 
 pub async fn run(global: &GlobalFlags, group_id: Option<u64>, format: OutputFormat) -> Result<()> {
-    let lk = lock::load().unwrap_or_default();
-    let client = make_client(global);
+    run_with(
+        &make_client(global),
+        Path::new(lock::FILE),
+        group_id,
+        format,
+    )
+    .await
+}
+
+async fn run_with(
+    client: &RbxApiKeyClient,
+    lock_path: &Path,
+    group_id: Option<u64>,
+    format: OutputFormat,
+) -> Result<()> {
+    // `?` and not `unwrap_or_default`: an absent lockfile already loads as an
+    // empty one, so the default only ever replaced an error, and a lockfile
+    // that could not be read then showed every key of the project as
+    // untracked.
+    let lk = lock::load_from(lock_path)?;
 
     // Printed rather than assumed: the listing is scoped to whichever cookie is
     // active, and switching the signed-in Studio account changes that silently. Two accounts can hold keys
@@ -26,7 +47,7 @@ pub async fn run(global: &GlobalFlags, group_id: Option<u64>, format: OutputForm
     // The same call is what proves the session is still live, and it is
     // cached per process, so the document costs no round trip of its own.
     let whoami = client.authenticated_account().await?;
-    let keys = remote_view::fetch(&client, &lk, group_id).await?;
+    let keys = remote_view::fetch(client, &lk, group_id).await?;
 
     // Before the empty check, for the same reason `list` emits an empty
     // document: no keys on the account is an answer with a `.totals.total` of
@@ -118,4 +139,40 @@ pub async fn run(global: &GlobalFlags, group_id: Option<u64>, format: OutputForm
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::MockServer;
+
+    /// A lockfile that cannot be looked at stops `list --remote` before it
+    /// asks Roblox anything. Defaulted to empty, it labelled every key this
+    /// project tracks as untracked, which is the listing `prune` invites you
+    /// to delete from.
+    #[tokio::test]
+    async fn a_lockfile_that_cannot_be_looked_at_stops_the_listing() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let lock_path = crate::test_support::unlookable(dir.path());
+        let server = MockServer::start().await;
+        let client = RbxApiKeyClient::new(Some("remote-unlookable".to_string()))
+            .with_base_url(server.uri())
+            .with_users_base_url(server.uri());
+
+        let err = run_with(
+            &client,
+            &lock_path,
+            None,
+            OutputFormat::from_json_flag(true),
+        )
+        .await
+        .expect_err("the lockfile cannot be looked at");
+
+        assert!(format!("{err:#}").contains("failed to look at"), "{err:#}");
+        assert!(server
+            .received_requests()
+            .await
+            .expect("recording")
+            .is_empty());
+    }
 }

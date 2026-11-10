@@ -98,7 +98,10 @@ struct ActiveKey {
 pub async fn run(cli: DoctorCli, global: &GlobalFlags) -> Result<()> {
     println!("{}", "rbx-apikey doctor".cyan().bold());
 
-    let declared = diagnostics::declared_keys().unwrap_or_default();
+    // `?`: a config or lockfile that is there and cannot be read stops the
+    // diagnosis, naming the file. Defaulted to empty, the report said this
+    // directory declares no keys, about a directory that does.
+    let declared = diagnostics::declared_keys()?;
     let mut r = Report::default();
 
     let active = resolve_active_key(&cli, global, &declared);
