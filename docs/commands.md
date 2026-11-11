@@ -57,7 +57,7 @@ Print the raw secret on stdout, for a script: `export RBX_API_KEY=$(rbx-apikey r
 
 `rbx-apikey introspect <key>`
 
-What Roblox stored for the key. Only works while the secret is under an hour old.
+What Roblox stored for the key. Only works while the secret is under an hour old. It authenticates with the secret alone, so it never asks to use a signed-in Studio.
 
 ## Inspecting
 

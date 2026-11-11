@@ -281,8 +281,11 @@ fn facts_from_remote(key: &remote_view::RemoteKey) -> KeyFacts {
 /// is still valid, roughly an hour after create or regenerate. An `Err` here is
 /// the ordinary case for any older key and callers should treat it as
 /// "unavailable", not "broken".
-pub async fn introspect_scopes(global: &GlobalFlags, secret: &str) -> Result<Vec<ScopeDef>> {
-    let client = make_client(global);
+///
+/// The secret is the only credential `introspect` takes, so no cookie is
+/// resolved for it, and no consent to use a signed-in Studio is asked.
+pub async fn introspect_scopes(secret: &str) -> Result<Vec<ScopeDef>> {
+    let client = RbxApiKeyClient::new(None);
     let resp = client.introspect_api_key(secret).await?;
     match crate::introspect::scopes_from_response(&resp) {
         None => Err(anyhow::anyhow!("introspect returned no scopes array")),

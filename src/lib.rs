@@ -472,7 +472,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
         ApikeyCommands::Resolve { key } => commands::resolve::run(&key),
 
-        ApikeyCommands::Introspect { key } => commands::introspect::run(global, &key).await,
+        ApikeyCommands::Introspect { key } => commands::introspect::run(&key).await,
 
         ApikeyCommands::Scopes { action } => match action {
             ScopesAction::List => {
