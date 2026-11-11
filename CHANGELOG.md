@@ -7,6 +7,10 @@
 - An answer from Roblox that could not be read is no longer quoted in the error. The answer to a create or a regenerate carries the new secret, and a listing the first characters of every secret, so a change on Roblox's side would have printed one. The error gives the parse error with its quoted values withheld, the answer's length and its field names. A lockfile entry and the other values holding a secret print it as `<redacted>` under `{:?}`.
 - `regenerate`'s `Secret (save this manually)` line, printed when a rotated secret could not be stored, goes to stderr. It went to stdout, which a script captures or pipes into a file.
 
+### Fixed
+
+- `create` stops before asking anything when an env the lockfile records now resolves to another universe in `rbxplace.toml`, as `update`, `regenerate` and `delete` do. It resolved the env afresh and wrote the new universe into the lockfile's shared entry, so the keys created for the old universe no longer showed as drifted.
+
 ## [0.2.0] - 2026-11-10
 
 ### Fixed
