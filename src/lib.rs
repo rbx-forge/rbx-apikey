@@ -77,7 +77,7 @@ pub enum ApikeyCommands {
         #[arg(long = "no-ip")]
         no_ip: bool,
 
-        /// Overwrite existing lockfile entries.
+        /// Replace a key the lockfile tracks: delete it on Roblox, then create a new one.
         #[arg(long)]
         force: bool,
 
