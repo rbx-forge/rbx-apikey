@@ -88,9 +88,8 @@ pub struct Settings {
     pub default_secret_file: Option<String>,
     /// Refuse any key in this file that asks for a write operation.
     ///
-    /// For a directory whose whole point is that it cannot write (`prodread/`
-    /// here) where the rule used to live in a comment and was enforced by
-    /// nothing. A per-key `readonly` adds to this; neither turns the other off.
+    /// For a directory whose whole point is that it cannot write, where the
+    /// rule used to live in a comment and was enforced by nothing. A per-key `readonly` adds to this; neither turns the other off.
     pub readonly: bool,
 }
 
@@ -623,8 +622,8 @@ const READ_ONLY_OPERATIONS: &[&str] = &["read", "list"];
 /// Refuse a key that declares `readonly` and then asks for a write.
 ///
 /// **This exists because the enforcement that was claimed does not exist.**
-/// `prodread/rbxapikey.example.toml` said a key declared there "cannot be made
-/// to write no matter what code calls it", on the grounds that Roblox binds
+/// An example config for read-only keys said a key declared there "cannot be
+/// made to write no matter what code calls it", on the grounds that Roblox binds
 /// scopes at creation. Half of that is true: no call widens a key at runtime.
 /// The other half was disproved by running `rbx-apikey update` on an already
 /// created key and watching Roblox accept `asset:read,write`. The verb that
@@ -1176,13 +1175,16 @@ mod tests {
         let k = key_with("universe:read");
         let cfg = Config {
             settings: Settings {
-                default_allowed_cidrs: vec!["1.1.1.1/32".into()],
+                default_allowed_cidrs: vec!["203.0.113.7/32".into()],
                 default_enabled: true,
                 ..Default::default()
             },
             keys: BTreeMap::new(),
         };
-        assert_eq!(get_allowed_cidrs(&cfg, &k), vec!["1.1.1.1/32".to_string()]);
+        assert_eq!(
+            get_allowed_cidrs(&cfg, &k),
+            vec!["203.0.113.7/32".to_string()]
+        );
     }
 
     #[test]

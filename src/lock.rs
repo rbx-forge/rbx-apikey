@@ -5,7 +5,8 @@
 //! Schema is bumped from v3 → v4: the per-key `universe_ids` / `universe_owners`
 //! vectors were lifted into a top-level `[envs.<name>]` table referenced indirectly
 //! through each key's `envs` list in `rbxapikey.toml`. Old v3 files are rejected
-//! (no migration shim): delete the file and re-run `rbx-apikey create`.
+//! (no migration shim), with advice that deletes the keys they record before
+//! anything recreates them: see `older_schema_advice`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -132,18 +133,38 @@ pub fn load_from(path: &Path) -> Result<Lock> {
     if lock.version == 0 {
         lock.version = VERSION;
     }
-    if lock.version != VERSION {
+    if lock.version > VERSION {
         bail!(
-            "{} has schema version {} but this tool expects v{}. \
-             Lockfile migrations are not supported: delete {} and re-run \
-             `rbx-apikey create --all` to regenerate it.",
+            "{} has schema version {}, and this build reads v{}: it was written by a newer \
+             rbx-apikey. Update this one.",
             path.display(),
             lock.version,
-            VERSION,
-            path.display()
+            VERSION
         );
     }
+    if lock.version != VERSION {
+        bail!("{}", older_schema_advice(path, lock.version));
+    }
     Ok(lock)
+}
+
+/// What to do with a lockfile of an older schema, which this build will not
+/// migrate.
+///
+/// The advice used to be "delete it and run `create --all`". The keys the
+/// file records are still live on Roblox, so that gave every one of them a
+/// second key and left the first with no record anywhere. Deleting them comes
+/// first, by either of the two routes that can still see them.
+fn older_schema_advice(path: &Path, version: u32) -> String {
+    format!(
+        "{path} has schema version {version} and this build reads v{VERSION}; lockfiles are \
+         not migrated. The keys it records still exist on Roblox, so deleting it and running \
+         `rbx-apikey create --all` would give each one a second key and leave the first live \
+         with no record. Delete those keys first: with the rbx-apikey version that wrote the \
+         file (`rbx-apikey delete --all`), or with this one by moving the file aside and \
+         picking them in `rbx-apikey prune --untracked-only`. Then run `rbx-apikey create --all`.",
+        path = path.display()
+    )
 }
 
 pub fn save_to(lock: &Lock, path: &Path) -> Result<()> {
@@ -350,12 +371,26 @@ mod tests {
             "expected message about v4, got: {}",
             err
         );
-        assert!(
-            err.contains("delete") || err.contains("re-run"),
-            "expected actionable hint, got: {}",
-            err
-        );
+        // The advice deletes the keys the file records before anything
+        // recreates them: "delete the file and create --all" made a second
+        // key for each and left the first live and untracked.
+        assert!(err.contains("delete --all"), "{err}");
+        assert!(err.contains("prune --untracked-only"), "{err}");
+        assert!(err.contains("second key"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A newer schema is not this build's to judge, and nothing about it
+    /// needs deleting.
+    #[test]
+    fn a_newer_schema_asks_for_a_newer_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE);
+        std::fs::write(&path, "version = 5\n").unwrap();
+
+        let err = load_from(&path).unwrap_err().to_string();
+        assert!(err.contains("newer"), "{err}");
+        assert!(!err.contains("delete"), "{err}");
     }
 
     #[test]

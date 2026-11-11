@@ -244,12 +244,12 @@ mod tests {
 
     #[test]
     fn a_tracked_key_is_deleted_by_its_lockfile_name_not_its_remote_one() {
-        // The lockfile knows it as `viewer`; Roblox calls it `prodread_viewer`.
+        // The lockfile knows it as `viewer`; Roblox calls it `myproject_viewer`.
         // `delete_one` looks it up by the former, so passing the latter would
         // find nothing and skip the cleanup entirely.
         let k = remote_key(
-            "f58b4055",
-            "prodread_viewer",
+            "aaaaBBBB",
+            "myproject_viewer",
             Tracked::Yes("viewer".to_string()),
         );
         assert_eq!(

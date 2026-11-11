@@ -59,7 +59,7 @@ expiration_days = 30
 Targets live in the file only. `--env`, `--place`, `--universe-id` and `--place-id` are refused on key subcommands (except [`can-manage`](commands.md#rbx-apikey-can-manage) and [`doctor`](doctor.md)): a universe given on `create` would be forgotten by the next `update`.
 
 - `envs`, `universe_ids` and `place_ids` combine. `default_envs` applies only to a key naming none of them.
-- The universes resolved from envs are recorded in the lockfile. If `rbxplace.toml` later points an env elsewhere, every command refuses and shows the change. To accept it, delete that key's lockfile entry and re-run.
+- The universes resolved from envs are recorded in the lockfile, under `[envs.<name>]`. If `rbxplace.toml` later points an env elsewhere, `create`, `update`, `regenerate`, `delete` and `status` refuse and show the change. To accept it, delete that `[envs.<name>]` section of the lockfile, not a key's entry, then `rbx-apikey update` the keys on that env so their scopes follow. A key's entry is the only record of a live key: without it, `create` would make a second one.
 
 ## One key per environment
 

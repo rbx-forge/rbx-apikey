@@ -236,7 +236,7 @@ pub enum ApikeyCommands {
         #[arg(long)]
         all: bool,
 
-        /// Skip confirmation (required for --all).
+        /// Skip the confirmation (with --all, the "Proceed?" question).
         #[arg(long, short = 'y')]
         yes: bool,
 

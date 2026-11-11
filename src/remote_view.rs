@@ -11,8 +11,8 @@
 //!    the Creator Hub. So every key carries a [`Tracked`] verdict and nothing
 //!    is ever selected for you.
 //! 2. Names are not identity. The lockfile calls a key `viewer` while Roblox
-//!    calls it `prodread_viewer`, and two different accounts each hold a
-//!    `ske_asphalt`. The join is on `cloud_auth_id` and only on that.
+//!    calls it `myproject_viewer`, and two different accounts each hold a
+//!    `game_deploy`. The join is on `cloud_auth_id` and only on that.
 
 use std::collections::HashMap;
 
@@ -222,19 +222,19 @@ mod tests {
     #[test]
     fn tracked_is_decided_by_id_not_by_name() {
         // The real shape of the problem: the lockfile calls it `viewer`, the
-        // account calls it `prodread_viewer`. Matching on names would report
+        // account calls it `myproject_viewer`. Matching on names would report
         // this key as untracked and offer it for deletion.
-        let lk = lock_with(&[("viewer", "f58b4055")]);
-        let joined = join_with_lock(vec![remote("f58b4055", "prodread_viewer")], &lk);
+        let lk = lock_with(&[("viewer", "aaaaBBBB")]);
+        let joined = join_with_lock(vec![remote("aaaaBBBB", "myproject_viewer")], &lk);
         assert_eq!(joined[0].tracked, Tracked::Yes("viewer".to_string()));
     }
 
     #[test]
     fn a_matching_name_with_a_different_id_stays_untracked() {
-        // Two accounts each hold an `ske_asphalt`. Trusting the name would
+        // Two accounts each hold a `game_deploy`. Trusting the name would
         // delete the wrong account's key.
-        let lk = lock_with(&[("ske_asphalt", "aaaa-1111")]);
-        let joined = join_with_lock(vec![remote("bbbb-2222", "ske_asphalt")], &lk);
+        let lk = lock_with(&[("game_deploy", "aaaa-1111")]);
+        let joined = join_with_lock(vec![remote("bbbb-2222", "game_deploy")], &lk);
         assert_eq!(joined[0].tracked, Tracked::No);
     }
 
