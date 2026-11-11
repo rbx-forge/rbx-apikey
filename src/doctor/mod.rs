@@ -89,10 +89,19 @@ impl KeyOrigin {
     }
 }
 
-#[derive(Debug)]
 struct ActiveKey {
     secret: String,
     origin: KeyOrigin,
+}
+
+/// By hand, so `{:?}` never prints the key being diagnosed.
+impl std::fmt::Debug for ActiveKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActiveKey")
+            .field("secret", &crate::out::REDACTED)
+            .field("origin", &self.origin)
+            .finish()
+    }
 }
 
 pub async fn run(cli: DoctorCli, global: &GlobalFlags) -> Result<()> {

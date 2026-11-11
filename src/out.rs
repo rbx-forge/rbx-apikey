@@ -13,6 +13,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static STDOUT_RESERVED: AtomicBool = AtomicBool::new(false);
 
+/// What a secret prints as under `{:?}`. Every type holding one implements
+/// `Debug` by hand with this in its place.
+pub const REDACTED: &str = "<redacted>";
+
 /// Reserve stdout for the secret for the rest of the process.
 pub fn reserve_stdout() {
     STDOUT_RESERVED.store(true, Ordering::Relaxed);

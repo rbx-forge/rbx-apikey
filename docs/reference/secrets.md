@@ -33,3 +33,9 @@ The lockfile records `secret_external = true` for the key, so `status` does not 
     If the pipe fails, the secret is lost: rotate again with `regenerate --stdout`. `--stdout` takes one key, never `--all`.
 
 `--json` output never includes a secret, a piece of one, or where it is stored.
+
+## Where a secret is never printed
+
+An error never quotes a Roblox answer that could not be read: it gives the parse error with any quoted value withheld, the answer's length and its field names. The answer to a create or a regenerate holds the new secret, and a listing holds the first characters of every secret.
+
+One line prints a secret on purpose: when `regenerate` has rotated a key and could not store the new secret, it prints `Secret (save this manually)` on stderr, since the old secret is already dead and Roblox will not show the new one again.

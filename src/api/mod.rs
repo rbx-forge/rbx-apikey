@@ -180,6 +180,67 @@ impl RbxApiKeyClient {
     }
 }
 
+/// Why a successful answer could not be read, without the answer itself.
+///
+/// The body of a create or a regenerate carries `apikeySecret`, the body of a
+/// listing carries the first characters of every secret, and an error line
+/// ends up in a terminal, a CI log or a pasted issue. So the error names what
+/// failed, the body's length and its top-level field names, never a value.
+///
+/// serde's own message is kept, because it names the field that did not fit,
+/// with every double-quoted part of it withheld: that is where it quotes an
+/// unexpected string in full, while field names go in backticks.
+pub(crate) fn unreadable_response(
+    what: &str,
+    error: &serde_json::Error,
+    body: &str,
+) -> anyhow::Error {
+    let shape = match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(serde_json::Value::Object(fields)) if fields.is_empty() => {
+            "it is an empty JSON object".to_string()
+        }
+        Ok(serde_json::Value::Object(fields)) => format!(
+            "its top-level fields are {}",
+            fields.keys().cloned().collect::<Vec<_>>().join(", ")
+        ),
+        Ok(_) => "it is JSON, but not an object".to_string(),
+        Err(_) => "it is not JSON".to_string(),
+    };
+    anyhow::anyhow!(
+        "failed to parse {what} response: {}. The body ({} bytes) is not shown because it \
+         may hold a secret; {shape}.",
+        withhold_quoted(&error.to_string()),
+        body.len()
+    )
+}
+
+/// `text` with the content of every double-quoted part replaced by `…`.
+///
+/// A quoted part follows Rust's `{:?}` escaping, which is how serde quotes a
+/// string: a backslash escapes the next character. An unterminated quote
+/// withholds everything after it.
+fn withhold_quoted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            out.push(c);
+            continue;
+        }
+        out.push_str("\"…\"");
+        while let Some(inner) = chars.next() {
+            match inner {
+                '\\' => {
+                    chars.next();
+                }
+                '"' => break,
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 // No Studio lookup happens in this crate, on purpose. A second lookup site is
 // how `--no-auto-cookie` once stopped working: the flag turned the first one
 // off and the second auto-detected anyway. One chain cannot diverge from
@@ -191,6 +252,51 @@ impl RbxApiKeyClient {
 /// there. What this owns is that its client asks the right host with the right
 /// cookie, that the creator-id lookup and the preflight are the same question,
 /// and that a refusal comes back as one.
+#[cfg(test)]
+mod unreadable_tests {
+    use super::*;
+
+    fn parse_error(body: &str) -> serde_json::Error {
+        #[derive(Debug, serde::Deserialize)]
+        #[allow(dead_code)]
+        struct Shape {
+            id: u64,
+        }
+        serde_json::from_str::<Shape>(body).unwrap_err()
+    }
+
+    /// serde quotes the string it did not expect, in full. Withheld, the rest
+    /// of its message survives: what was expected and where.
+    #[test]
+    fn a_quoted_value_in_the_parse_error_is_withheld() {
+        let body = r#"{"id": "not-a-real-secret"}"#;
+        let text = unreadable_response("create", &parse_error(body), body).to_string();
+
+        assert!(!text.contains("not-a-real-secret"), "{text}");
+        assert!(text.contains("expected u64"), "{text}");
+        assert!(text.contains("its top-level fields are id"), "{text}");
+        assert!(text.contains(&format!("{} bytes", body.len())), "{text}");
+    }
+
+    #[test]
+    fn a_body_that_is_not_json_is_not_shown_either() {
+        let body = "apikeySecret=not-a-real-secret";
+        let text = unreadable_response("create", &parse_error(body), body).to_string();
+
+        assert!(!text.contains("not-a-real-secret"), "{text}");
+        assert!(text.contains("it is not JSON"), "{text}");
+    }
+
+    #[test]
+    fn an_escaped_quote_does_not_end_the_withheld_part() {
+        assert_eq!(
+            withhold_quoted(r#"string "a\"b c", expected `id`"#),
+            "string \"…\", expected `id`"
+        );
+        assert_eq!(withhold_quoted(r#"open "never closed"#), "open \"…\"");
+    }
+}
+
 #[cfg(test)]
 mod session_tests {
     use super::*;
