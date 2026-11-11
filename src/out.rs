@@ -37,6 +37,20 @@ macro_rules! say {
     };
 }
 
+/// Hand a secret nothing could store to the reader, to save by hand: Roblox
+/// will not show it again.
+///
+/// On stderr whatever stdout is doing. stdout is what gets piped into a file
+/// or captured by CI as the command's output, and a secret printed there is
+/// one more copy nobody asked to keep.
+pub fn hand_over_secret(secret: &str) {
+    use colored::Colorize;
+    eprintln!(
+        "{}",
+        format!("  Secret (save this manually): {secret}").yellow()
+    );
+}
+
 /// Write the secret to stdout, with no trailing newline, as `resolve` does.
 pub fn emit_secret(secret: &str) -> anyhow::Result<()> {
     use std::io::Write;

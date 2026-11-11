@@ -216,19 +216,6 @@ impl Rotation {
     }
 }
 
-/// The line that hands a rotated secret to the reader when nothing could store
-/// it: the old secret is dead and Roblox will not show this one again.
-///
-/// On stderr whatever stdout is doing. stdout is what gets piped into a file
-/// or captured by CI as the command's output, and a secret printed there is
-/// one more copy nobody asked to keep.
-fn manual_save(secret: &str) {
-    eprintln!(
-        "{}",
-        format!("  Secret (save this manually): {secret}").yellow()
-    );
-}
-
 /// Rotate one key and store its new secret at `new_resolved`, the destination
 /// the run planned and the git guard checked.
 async fn regenerate_one(
@@ -295,7 +282,7 @@ async fn regenerate_one(
             )
             .red()
         );
-        manual_save(&new_secret);
+        crate::out::hand_over_secret(&new_secret);
         return Rotation::Unsaved;
     }
 
@@ -322,7 +309,7 @@ async fn regenerate_one(
             .red()
         );
         if new_resolved.backend == secret_store::Backend::Lockfile {
-            manual_save(&new_secret);
+            crate::out::hand_over_secret(&new_secret);
         }
         return Rotation::Unsaved;
     }
@@ -392,6 +379,7 @@ mod tests {
                 secret: Some("the-old-secret".into()),
                 secret_file: None,
                 secret_external: false,
+                secret_unsaved: false,
                 creator_id: 1234567890,
                 is_enabled: true,
                 created_at: "now".into(),

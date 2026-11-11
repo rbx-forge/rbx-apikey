@@ -470,6 +470,7 @@ mod tests {
             secret: Some("RBX-S3CR3T-must-never-be-serialised".into()),
             secret_file: Some("/home/dev/.secrets/deploy.env".into()),
             secret_external: false,
+            secret_unsaved: false,
             creator_id: 1_234_567_890,
             is_enabled: true,
             created_at: "2026-01-01T00:00:00.000Z".into(),

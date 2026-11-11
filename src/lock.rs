@@ -66,6 +66,12 @@ pub struct LockEntry {
     /// `SECRET_MISSING` for the rest of its life.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub secret_external: bool,
+    /// Roblox created the key and its secret could not be stored anywhere.
+    /// The entry is still written, because it is the only record that the
+    /// key exists; the mark makes every reader treat the secret as missing,
+    /// even when a file at its path holds an older one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub secret_unsaved: bool,
     pub creator_id: u64,
     pub is_enabled: bool,
     pub created_at: String,
@@ -85,6 +91,7 @@ impl std::fmt::Debug for LockEntry {
             )
             .field("secret_file", &self.secret_file)
             .field("secret_external", &self.secret_external)
+            .field("secret_unsaved", &self.secret_unsaved)
             .field("creator_id", &self.creator_id)
             .field("is_enabled", &self.is_enabled)
             .field("created_at", &self.created_at)
@@ -225,6 +232,7 @@ mod tests {
                 secret: Some("S".into()),
                 secret_file: None,
                 secret_external: false,
+                secret_unsaved: false,
                 creator_id: 42,
                 is_enabled: true,
                 created_at: "2026-05-01T10:00:00.000Z".into(),
@@ -255,6 +263,7 @@ mod tests {
                 secret: None,
                 secret_file: Some("./secret.key".into()),
                 secret_external: false,
+                secret_unsaved: false,
                 creator_id: 1,
                 is_enabled: true,
                 created_at: "now".into(),
@@ -279,6 +288,7 @@ mod tests {
             secret: None,
             secret_file: None,
             secret_external: false,
+            secret_unsaved: false,
             creator_id: 1,
             is_enabled: true,
             created_at: "now".into(),
@@ -304,6 +314,7 @@ mod tests {
                 secret: Some("not-a-real-secret".into()),
                 secret_file: None,
                 secret_external: false,
+                secret_unsaved: false,
                 creator_id: 1,
                 is_enabled: true,
                 created_at: "now".into(),

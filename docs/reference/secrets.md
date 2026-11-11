@@ -38,4 +38,6 @@ The lockfile records `secret_external = true` for the key, so `status` does not 
 
 An error never quotes a Roblox answer that could not be read: it gives the parse error with any quoted value withheld, the answer's length and its field names. The answer to a create or a regenerate holds the new secret, and a listing holds the first characters of every secret.
 
-One line prints a secret on purpose: when `regenerate` has rotated a key and could not store the new secret, it prints `Secret (save this manually)` on stderr, since the old secret is already dead and Roblox will not show the new one again.
+One line prints a secret on purpose: when `create` or `regenerate` got a secret from Roblox and could not store it, it prints `Secret (save this manually)` on stderr, since Roblox will not show it again, and the command exits non-zero.
+
+A key `create` made that way is still recorded in the lockfile, marked `secret_unsaved = true`, so it is never a live key nothing names. Every command then treats its secret as missing, even if its file holds an older one: `status` shows `SECRET_MISSING` with "never stored". The printed secret works wherever you save it; for this project to hold one again, run `rbx-apikey regenerate <key>`, which stores a new secret and clears the mark.

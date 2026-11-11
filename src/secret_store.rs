@@ -82,7 +82,13 @@ pub fn backend_for(cfg: &Config, key_cfg: Option<&KeyConfig>, tool_name: &str) -
 /// naming it, and not a missing secret. Read as missing, `update` said a
 /// secret it could not open was "not found" and sent the reader to rotate a
 /// key whose secret was fine, and `status` and `list` reported it missing.
+///
+/// An entry marked `secret_unsaved` has none, whatever its file holds: that
+/// secret was never written, and a file at the path is an older key's.
 pub fn read(resolved: &Resolved, lock_entry: Option<&LockEntry>) -> Result<Option<String>> {
+    if lock_entry.is_some_and(|e| e.secret_unsaved) {
+        return Ok(None);
+    }
     match resolved.backend {
         Backend::Lockfile => Ok(lock_entry
             .and_then(|e| e.secret.clone())
@@ -108,6 +114,7 @@ pub fn read(resolved: &Resolved, lock_entry: Option<&LockEntry>) -> Result<Optio
 /// that is. `External` stores nothing: the caller prints the secret.
 pub fn write(resolved: &Resolved, secret: &str, lock_entry: &mut LockEntry) -> Result<()> {
     lock_entry.secret_external = false;
+    lock_entry.secret_unsaved = false;
     match resolved.backend {
         Backend::External => {
             lock_entry.secret = None;
@@ -286,6 +293,7 @@ mod tests {
             secret: secret.map(|s| s.to_string()),
             secret_file: secret_file.map(|s| s.to_string()),
             secret_external: false,
+            secret_unsaved: false,
             creator_id: 1,
             is_enabled: true,
             created_at: "now".into(),
@@ -501,6 +509,26 @@ mod tests {
         // An absent file is nothing to clean, and nothing to report.
         let absent = cleanup(&file_at(&dir.path().join("absent.env")), true);
         assert!(absent.auto_cleaned.is_empty() && absent.manual_action_needed.is_empty());
+    }
+
+    /// A key whose secret was never stored has none, even with an older
+    /// key's secret sitting in its file; storing one clears the mark.
+    #[test]
+    fn an_unsaved_secret_is_missing_until_one_is_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deploy.env");
+        std::fs::write(&path, "an-older-key's-secret").unwrap();
+        let mut entry = entry_with(None, None);
+        entry.secret_unsaved = true;
+
+        assert_eq!(read(&file_at(&path), Some(&entry)).unwrap(), None);
+
+        write(&file_at(&path), "NEW", &mut entry).unwrap();
+        assert!(!entry.secret_unsaved);
+        assert_eq!(
+            read(&file_at(&path), Some(&entry)).unwrap().as_deref(),
+            Some("NEW")
+        );
     }
 
     /// Absent and empty are still a missing secret, for the caller to judge.

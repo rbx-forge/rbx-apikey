@@ -313,6 +313,7 @@ mod tests {
             secret: None,
             secret_file: None,
             secret_external: false,
+            secret_unsaved: false,
             creator_id: 1234567890,
             is_enabled: true,
             created_at: "now".into(),
