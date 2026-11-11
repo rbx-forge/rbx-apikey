@@ -219,8 +219,9 @@ async fn create_planned(
     skip_verify: bool,
     lock_path: &Path,
 ) -> Result<()> {
-    let prepared = prepare_key(cfg, places, lk, client, name, no_ip).await?;
-    if lock::get(lk, name).is_some() {
+    let replacing = lock::get(lk, name).is_some();
+    let prepared = prepare_key(cfg, places, lk, client, name, no_ip, replacing).await?;
+    if replacing {
         replace_tracked(cfg, lk, client, name, resolved, lock_path).await?;
     }
     // Records the key on disk itself, whatever became of its secret.
@@ -364,10 +365,12 @@ struct Prepared {
 /// their owners, its scopes, its CIDRs, its name and description.
 ///
 /// Done before `--force` deletes the key it replaces, so a creation that was
-/// going to fail here fails with the old key still working. The name and the
-/// description are only built: Roblox alone decides whether it takes them
-/// (see `explain_invalid_name_or_description`), and that answer comes with the
-/// creation itself.
+/// going to fail here fails with the old key still working.
+///
+/// When `replacing`, a name or description carrying `rbx` or `roblox` is
+/// refused here too: Roblox refuses those, and by then the working key would
+/// be gone. A plain create leaves that judgement to Roblox (see
+/// `explain_invalid_name_or_description`), since nothing is lost if it says no.
 async fn prepare_key(
     cfg: &config::Config,
     places: Option<&PlacesFile>,
@@ -375,6 +378,7 @@ async fn prepare_key(
     client: &RbxApiKeyClient,
     name: &str,
     no_ip: bool,
+    replacing: bool,
 ) -> Result<Prepared> {
     // `plan` skipped the keys that are not declared.
     let key_cfg = config::get(cfg, name)
@@ -403,6 +407,19 @@ async fn prepare_key(
         allowed_cidrs: cidrs,
         scopes: build.scopes,
     };
+    if replacing
+        && (super::carries_brand(&payload.name) || super::carries_brand(&payload.description))
+    {
+        bail!(
+            "\"{name}\": Roblox refuses a key whose name or description contains `rbx` or \
+             `roblox`, and --force would delete the working key before asking. Nothing was \
+             deleted. Sent name: \"{}\". Sent description: \"{}\". Set `name` or `description` \
+             on the key in {} to drop the word, then run this again.",
+            payload.name,
+            payload.description,
+            config::FILE
+        );
+    }
     Ok(Prepared { payload, synced })
 }
 
@@ -438,27 +455,6 @@ async fn create_prepared(
     let secret = resp.apikey_secret;
     if info.id.is_empty() || secret.is_empty() {
         bail!("create failed for \"{}\" - unexpected response", name);
-    }
-
-    // Roblox sometimes ignores expirationTime on CREATE; re-apply via PATCH if missing.
-    let response_expiry = info
-        .cloud_auth_user_configured_properties
-        .as_ref()
-        .and_then(|p| p.expiration_time.clone());
-    if response_expiry.is_none() && expiration_time.is_some() {
-        // Best-effort: the key already exists and we hold its secret. If this
-        // re-PATCH fails, do NOT abort - that would discard the secret and
-        // orphan the key on Roblox. Warn and continue to persist it.
-        if let Err(e) = client.update_api_key(&info.id, &payload).await {
-            eprintln!(
-                "{}",
-                format!(
-                    "warning: key created but re-applying expiration failed: {e}\n  \
-                     the key works; verify its expiry with `rbx-apikey status --remote`"
-                )
-                .yellow()
-            );
-        }
     }
 
     // Where `plan` said, which is where the git guard looked.
@@ -502,9 +498,12 @@ async fn create_prepared(
     // entry is the only thing that keeps it from being a live key nothing
     // names. One whose secret went nowhere is marked so, and every reader
     // treats its secret as missing.
+    //
+    // On disk before anything else is asked of Roblox: the expiry re-PATCH
+    // and the introspect check below can hang or be stopped, and neither may
+    // leave a live key nothing records.
+    let unsaved = kept.is_err();
     if let Err(why) = kept {
-        entry.mark_unsaved();
-        lock::set(lk, name, entry);
         say!(
             "{}",
             format!(
@@ -519,15 +518,41 @@ async fn create_prepared(
             Some(note) => say!("{}", note.yellow()),
             None => crate::out::hand_over_secret(&secret),
         }
-        record(lk, lock_path, name, &info.id, None)?;
+        lock::record_unsaved(lk, name, entry, lock_path)
+            .map_err(|e| unrecorded(name, &info.id, lock_path, e))?;
+    } else {
+        lock::set(lk, name, entry);
+        if let Err(e) = lock::save_to(lk, lock_path) {
+            // The lockfile was this secret's only copy.
+            if resolved.backend == secret_store::Backend::Lockfile {
+                crate::out::hand_over_secret(&secret);
+            }
+            return Err(unrecorded(name, &info.id, lock_path, e));
+        }
+    }
+
+    // Roblox sometimes ignores expirationTime on CREATE; re-apply via PATCH if
+    // missing. Best-effort: the key is recorded and its secret kept by now, so
+    // a failure here is a warning, and the key works.
+    let response_expiry = info
+        .cloud_auth_user_configured_properties
+        .as_ref()
+        .and_then(|p| p.expiration_time.clone());
+    if response_expiry.is_none() && expiration_time.is_some() {
+        if let Err(e) = client.update_api_key(&info.id, &payload).await {
+            eprintln!(
+                "{}",
+                format!(
+                    "warning: key created but re-applying expiration failed: {e}\n  \
+                     the key works; verify its expiry with `rbx-apikey status --remote`"
+                )
+                .yellow()
+            );
+        }
+    }
+    if unsaved {
         return Ok(Created::Unsaved);
     }
-    lock::set(lk, name, entry);
-    // On disk now, before the introspect check below: a hang or a Ctrl-C
-    // there must not leave a live key nothing records.
-    let only_in_the_lockfile =
-        (resolved.backend == secret_store::Backend::Lockfile).then_some(secret.as_str());
-    record(lk, lock_path, name, &info.id, only_in_the_lockfile)?;
 
     let where_str = match resolved.backend {
         secret_store::Backend::File => format!(" (secret → {})", resolved.target),
@@ -560,34 +585,20 @@ async fn create_prepared(
 /// CI job logs, and the secret was meant for a pipe. The way out is a new one,
 /// as `regenerate` says when its own printing fails.
 fn piped_note(name: &str, piped: bool) -> Option<String> {
+    // A failed write can stop partway, so part of the secret may already be
+    // in the pipe: the key is only safe once it has a new one.
     piped.then(|| {
         format!(
-            "  Run `rbx-apikey regenerate {name} --stdout` for a new secret; this one is not \
-             printed anywhere."
+            "  Part of the secret may have reached stdout before printing failed. Run \
+             `rbx-apikey regenerate {name} --stdout` for a new one."
         )
     })
 }
 
-/// Write the lockfile that now records a key Roblox has just created.
-///
-/// A save that fails leaves the key live with nothing naming it, so the error
-/// says so with its id. `secret_only_here` is the secret when the lockfile was
-/// its only copy: it is handed over on stderr, as `regenerate` does, since
-/// Roblox will not show it again.
-fn record(
-    lk: &lock::Lock,
-    lock_path: &Path,
-    name: &str,
-    id: &str,
-    secret_only_here: Option<&str>,
-) -> Result<()> {
-    let Err(e) = lock::save_to(lk, lock_path) else {
-        return Ok(());
-    };
-    if let Some(secret) = secret_only_here {
-        crate::out::hand_over_secret(secret);
-    }
-    bail!(
+/// The error for a key Roblox created that the lockfile could not record:
+/// live, with nothing here naming it, so it gives the id.
+fn unrecorded(name: &str, id: &str, lock_path: &Path, e: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!(
         "\"{name}\" is live on Roblox (id={id}), but {} could not be saved, so nothing here \
          records it: {e:#}. Once the file can be written, `rbx-apikey prune --untracked-only` \
          can delete it.",
@@ -942,6 +953,9 @@ mod tests {
         fn a_piped_secret_is_never_handed_over_on_stderr() {
             let note = piped_note("deploy", true).expect("a note instead of the secret");
             assert!(note.contains("regenerate deploy --stdout"), "{note}");
+            // A write can fail partway: "printed nowhere" may not be true.
+            assert!(note.contains("may have reached stdout"), "{note}");
+            assert!(!note.contains("not printed anywhere"), "{note}");
             assert!(piped_note("deploy", false).is_none());
         }
 
@@ -1039,9 +1053,9 @@ mod tests {
             let entry = lock::get(&on_disk, "ci").expect("the live key is recorded");
             assert_eq!(entry.cloud_auth_id, NEW_ID);
             assert!(entry.secret_unsaved);
-            // Nothing a build that ignores the mark could take for a secret.
             assert!(entry.secret.is_none());
-            assert!(entry.secret_file.is_none());
+            // Kept: it names the file a later cleanup has to find.
+            assert_eq!(entry.secret_file.as_deref(), Some(resolved.target.as_str()));
 
             let verdict = crate::commands::status::local_verdict_for_tests(
                 &cfg,
@@ -1051,6 +1065,111 @@ mod tests {
             );
             assert_eq!(verdict.0, "SECRET_MISSING");
             assert!(verdict.1.contains("never stored"), "{}", verdict.1);
+        }
+
+        /// A config in `dir` from `text`.
+        fn config_in(dir: &Path, text: &str) -> config::Config {
+            let path = dir.join(config::FILE);
+            std::fs::write(&path, text).unwrap();
+            config::load_from(&path).unwrap()
+        }
+
+        /// The tracked `deploy`, under `OLD_ID`, in a lockfile on disk.
+        fn tracked_deploy(lock_path: &Path) -> lock::Lock {
+            let mut lk = lock::Lock::default();
+            let mut old = tracked_entry();
+            old.cloud_auth_id = OLD_ID.into();
+            old.creator_id = CREATOR;
+            lock::set(&mut lk, "deploy", old);
+            lock::save_to(&lk, lock_path).unwrap();
+            lk
+        }
+
+        /// The expiry re-PATCH came between the creation and the record: a
+        /// hang or a Ctrl-C there left a live key nothing recorded.
+        #[tokio::test]
+        async fn the_key_is_recorded_before_the_expiry_is_reapplied() {
+            let dir = tempfile::tempdir().unwrap();
+            let (client, server) = server("create-record-before-patch", 200).await;
+            Mock::given(method("PATCH"))
+                .and(path("/cloud-authentication/v1/apiKey"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(30)),
+                )
+                .mount(&server)
+                .await;
+            let cfg = config_in(
+                dir.path(),
+                "[keys.deploy]\nscopes = [\"universe:read\"]\nexpiration_days = 30\n",
+            );
+            let lock_path = dir.path().join(lock::FILE);
+            let mut lk = lock::Lock::default();
+            let names = vec!["deploy".to_string()];
+            let resolved = plan(&cfg, &lk, &names, false, false)[0]
+                .1
+                .as_ref()
+                .unwrap()
+                .clone();
+
+            // Stopped while the PATCH hangs, as a Ctrl-C would stop it.
+            let stopped = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                create_planned(
+                    &cfg, None, &mut lk, &client, "deploy", &resolved, CREATOR, true, true,
+                    &lock_path,
+                ),
+            )
+            .await;
+            assert!(stopped.is_err(), "the PATCH should still be hanging");
+            assert_eq!(requests(&server, "PATCH").await.len(), 1);
+
+            let on_disk = lock::load_from(&lock_path).unwrap();
+            let entry = lock::get(&on_disk, "deploy").unwrap();
+            assert_eq!(entry.cloud_auth_id, NEW_ID);
+            assert_eq!(entry.secret.as_deref(), Some("the-new-secret"));
+        }
+
+        /// Roblox refuses a name or description carrying its brand, and
+        /// `--force` deleted the working key before asking. Refused here,
+        /// with nothing sent. A plain create still leaves it to Roblox.
+        #[tokio::test]
+        async fn force_refuses_a_branded_description_before_deleting_anything() {
+            let dir = tempfile::tempdir().unwrap();
+            let (client, server) = server("create-force-branded", 200).await;
+            let cfg = config_in(
+                dir.path(),
+                "[keys.deploy]\nscopes = [\"universe:read\"]\n\
+                 description = \"Deploys the ROBLOX place\"\n",
+            );
+            let lock_path = dir.path().join(lock::FILE);
+            let mut lk = tracked_deploy(&lock_path);
+            let names = vec!["deploy".to_string()];
+            let resolved = plan(&cfg, &lk, &names, true, false)[0]
+                .1
+                .as_ref()
+                .unwrap()
+                .clone();
+
+            let err = create_planned(
+                &cfg, None, &mut lk, &client, "deploy", &resolved, CREATOR, true, true, &lock_path,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("Nothing was deleted"), "{err}");
+            assert!(err.contains("Deploys the ROBLOX place"), "{err}");
+            assert!(requests(&server, "").await.is_empty(), "nothing was sent");
+            let on_disk = lock::load_from(&lock_path).unwrap();
+            assert_eq!(lock::get(&on_disk, "deploy").unwrap().cloud_auth_id, OLD_ID);
+
+            // Not replacing anything: the request goes to Roblox, which judges.
+            let mut fresh = lock::Lock::default();
+            let _ = create_planned(
+                &cfg, None, &mut fresh, &client, "deploy", &resolved, CREATOR, true, true,
+                &lock_path,
+            )
+            .await;
+            assert_eq!(requests(&server, "POST").await.len(), 1);
         }
 
         /// Only the planned keys the lockfile tracks are replaced.

@@ -54,7 +54,9 @@ pub fn missing_key_note(cfg: &config::Config, name: &str) -> String {
 /// `secrettest` passed in the same session, which is what the rule predicts:
 /// the commerce term alone is fine, the brand welded to it is not.
 ///
-/// **Nothing is refused locally, and the rule is why.** "Glued to an API or
+/// **A plain create refuses nothing locally, and the rule is why.** (`create
+/// --force` does, since it deletes a working key first: see [`carries_brand`].)
+/// "Glued to an API or
 /// commerce term" is a judgement, not a substring. A preflight check can only
 /// approximate it, and every approximation rejects text Roblox accepts, which
 /// is a worse failure than the one it replaces and an invisible one: nobody
@@ -103,6 +105,20 @@ pub fn explain_opaque_server_error(
          `rbx-apikey scopes list` shows which target each scope takes, and \
          `catalog regenerate` refreshes that from the key service."
     ))
+}
+
+/// Whether `text` carries `rbx` or `roblox`, in any case.
+///
+/// Every name or description Roblox has refused with `InvalidNameOrDescription`
+/// carried one of the two, and every one accepted carried neither. Used where
+/// a refusal would cost more than a failed request: `create --force` deletes
+/// the working key before the new one is asked for, so it checks this first
+/// and stops. A plain `create` still leaves the judgement to Roblox, for the
+/// reason [`explain_invalid_name_or_description`] gives, and explains the
+/// refusal when it comes.
+pub(crate) fn carries_brand(text: &str) -> bool {
+    let lowered = text.to_lowercase();
+    lowered.contains("rbx") || lowered.contains("roblox")
 }
 
 pub fn explain_invalid_name_or_description(
@@ -302,9 +318,7 @@ mod tests {
             update::build_description("deploy", key_cfg, &[]),
             update::build_description("deploy", key_cfg, &[123, 456]),
         ] {
-            let lowered = text.to_lowercase();
-            assert!(!lowered.contains("rbx"), "got: {text}");
-            assert!(!lowered.contains("roblox"), "got: {text}");
+            assert!(!carries_brand(&text), "got: {text}");
             // And it still says which declaration the key came from, which is
             // the only thing the string is for.
             assert!(text.contains("deploy"), "got: {text}");

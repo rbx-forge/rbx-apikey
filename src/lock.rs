@@ -83,15 +83,33 @@ impl LockEntry {
     /// Record that this key's secret was never stored, or that the one stored
     /// is dead: Roblox handed over a secret and nothing could keep it.
     ///
-    /// Clears `secret` and `secret_file` as well as setting the mark, so a
-    /// build that does not know `secret_unsaved` finds no secret in the entry
-    /// either, rather than a dead or older key's.
+    /// Clears `secret`, so the lockfile holds no dead secret for any build to
+    /// serve. `secret_file` stays: it names the file that may still hold a
+    /// dead or older secret, which a later cleanup needs to find. The mark is
+    /// what tells this build not to read that file.
     pub fn mark_unsaved(&mut self) {
         self.secret = None;
-        self.secret_file = None;
         self.secret_external = false;
         self.secret_unsaved = true;
     }
+}
+
+/// Record a key whose secret nothing could keep, marked as such, and write
+/// the lockfile at once.
+///
+/// One function for `create`, where Roblox made the key and its secret went
+/// nowhere, and `regenerate`, where the old secret is dead and the new one
+/// went nowhere: in both, the entry is the only record of a live key. The
+/// caller words a save that fails.
+pub fn record_unsaved(
+    lock: &mut Lock,
+    name: &str,
+    mut entry: LockEntry,
+    path: &Path,
+) -> Result<()> {
+    entry.mark_unsaved();
+    set(lock, name, entry);
+    save_to(lock, path)
 }
 
 /// By hand, so `{:?}` on an entry, or on the whole [`Lock`], shows whether a
