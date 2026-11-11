@@ -1,14 +1,16 @@
 //! `rbx-apikey introspect <key>`: print what Roblox has stored for a key.
 //! Requires the JWT inside the secret to still be valid (~1h after create/regenerate).
+//!
+//! The secret is the only credential the call carries. No cookie is resolved:
+//! resolving one asks for consent to use a signed-in Studio, and this command
+//! would then never send it.
 
 use anyhow::{anyhow, bail, Result};
 
+use crate::api::RbxApiKeyClient;
 use crate::{config, lock, secret_store};
-use rbx_core::GlobalFlags;
 
-use super::make_client;
-
-pub async fn run(global: &GlobalFlags, name: &str) -> Result<()> {
+pub async fn run(name: &str) -> Result<()> {
     let cfg = config::load()?;
     let lk = lock::load()?;
 
@@ -26,7 +28,7 @@ pub async fn run(global: &GlobalFlags, name: &str) -> Result<()> {
         )
     })?;
 
-    let client = make_client(global);
+    let client = RbxApiKeyClient::new(None);
     match client.introspect_api_key(&secret).await {
         Ok(resp) => {
             println!("{}", serde_json::to_string_pretty(&resp)?);
