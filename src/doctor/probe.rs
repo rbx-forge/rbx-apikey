@@ -75,6 +75,15 @@ impl Probe {
         };
 
         let status = response.status();
+        // The client stops at a redirect to another origin rather than take
+        // the key there. The body of a redirect often repeats its target,
+        // which can be a signed URL, so it is not read: the host is enough.
+        if status.is_redirection() {
+            return ProbeOutcome::Refused {
+                status,
+                message: unfollowed(&response),
+            };
+        }
         let body = response.text().await.unwrap_or_default();
         if status.is_success() {
             return ProbeOutcome::Ok {
@@ -85,6 +94,20 @@ impl Probe {
             status,
             message: message_from(&body),
         }
+    }
+}
+
+/// A redirect the client did not follow, named by the host it pointed to.
+fn unfollowed(response: &reqwest::Response) -> String {
+    let host = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|location| location.to_str().ok())
+        .and_then(|location| response.url().join(location).ok())
+        .and_then(|target| target.host_str().map(str::to_string));
+    match host {
+        Some(host) => format!("redirected to {host}, which was not followed"),
+        None => "redirected, and the redirect was not followed".to_string(),
     }
 }
 
@@ -301,6 +324,44 @@ mod tests {
                 ProbeOutcome::Refused { status, message } => {
                     assert_eq!(status, StatusCode::NOT_FOUND);
                     assert_eq!(message, "Universe not found");
+                }
+                other => panic!("expected Refused, got {other:?}"),
+            }
+        }
+
+        /// A redirect to another origin is not followed: the key would go
+        /// with it, since reqwest drops only `Authorization` and `Cookie` on
+        /// such a hop. Nothing of the redirect's body is shown, as it can
+        /// repeat a signed target.
+        #[tokio::test]
+        async fn a_redirect_to_another_host_does_not_take_the_key_there() {
+            let server = MockServer::start().await;
+            let elsewhere = MockServer::start().await;
+            let target = format!("{}/landing?signature=aaaaBBBBccccDDDD", elsewhere.uri());
+            Mock::given(method("GET"))
+                .and(path(format!("/cloud/v2/universes/{UNIVERSE}")))
+                .respond_with(
+                    ResponseTemplate::new(302)
+                        .insert_header("location", target.as_str())
+                        .set_body_string(format!("Found. Redirecting to {target}")),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+                .mount(&elsewhere)
+                .await;
+
+            let outcome = probe(&server).await;
+
+            assert!(
+                elsewhere.received_requests().await.unwrap().is_empty(),
+                "the redirect must not be followed with the key"
+            );
+            match outcome {
+                ProbeOutcome::Refused { status, message } => {
+                    assert_eq!(status, StatusCode::FOUND);
+                    assert_eq!(message, "redirected to 127.0.0.1, which was not followed");
                 }
                 other => panic!("expected Refused, got {other:?}"),
             }

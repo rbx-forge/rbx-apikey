@@ -4,6 +4,7 @@
 
 ### Security
 
+- **A request to Roblox no longer follows a redirect to another host.** The HTTP client forwarded every header but `Authorization` and `Cookie` on such a hop, so a redirect from the read `doctor` probes with would have taken the API key along. Every request to Roblox now stops at that redirect and reads it as the answer, a 3xx; `doctor` reports its status and names the host it pointed to and nothing else of it, since a redirect's body can repeat a signed target.
 - An answer from Roblox that could not be read is no longer quoted in the error. The answer to a create or a regenerate carries the new secret, and a listing the first characters of every secret, so a change on Roblox's side would have printed one. The error gives the parse error with its quoted values withheld, the answer's length and its field names; the same holds for the universe answer read when resolving an owner. A lockfile entry, a listed key's secret preview and the other values holding a secret print it as `<redacted>` under `{:?}`.
 - `regenerate`'s `Secret (save this manually)` line, printed when a rotated secret could not be stored, goes to stderr. It went to stdout, which a script captures or pipes into a file.
 
