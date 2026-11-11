@@ -61,8 +61,8 @@ impl RemoteKey {
     pub fn expiry_text(&self) -> String {
         match self.days_left() {
             None => "no expiry".to_string(),
-            Some(d) if d < 0 => format!("EXPIRED {}d ago", d.abs()),
-            Some(d) => format!("in {}d", d),
+            Some(d) if d < 0 => format!("EXPIRED {} ago", time_iso::span(d)),
+            Some(d) => format!("in {}", time_iso::span(d)),
         }
     }
 

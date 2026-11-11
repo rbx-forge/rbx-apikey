@@ -299,8 +299,8 @@ pub fn expiry_text(expires_at: Option<&str>) -> String {
     match expires_at.and_then(time_iso::days_until) {
         None if expires_at.is_none() => "no expiry".to_string(),
         None => "unparseable expiry".to_string(),
-        Some(d) if d < 0 => format!("expired {}d ago", d.abs()),
-        Some(d) => format!("in {d}d"),
+        Some(d) if d < 0 => format!("expired {} ago", time_iso::span(d)),
+        Some(d) => format!("in {}", time_iso::span(d)),
     }
 }
 
@@ -468,5 +468,8 @@ mod tests {
         assert_eq!(expiry_text(Some("not-a-date")), "unparseable expiry");
         assert!(expiry_text(Some(&time_iso::iso_in_days(10))).starts_with("in "));
         assert!(expiry_text(Some(&time_iso::iso_in_days(-10))).starts_with("expired "));
+        // An hour ago is past, not "in 0d".
+        let an_hour_ago = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        assert_eq!(expiry_text(Some(&an_hour_ago)), "expired under 1d ago");
     }
 }

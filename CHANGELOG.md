@@ -10,6 +10,7 @@
 ### Fixed
 
 - `create --force` on a key the lockfile tracks deletes that key on Roblox before creating the new one. It created the new key and wrote it over the record of the old one, which stayed live on Roblox with nothing in the project naming it. The keys it replaces are named before the confirmation; a key of another account is refused before anything happens; a delete that fails creates nothing and keeps the record.
+- A key that expired less than a day ago counts as expired. Days left were rounded toward zero, so it read `in 0d`, `status` called it `EXPIRING_SOON`, `list --remote` and `doctor` showed it active, `prune --expired-only` left it out, and `days_until_expiry` was `0`. Days are now rounded down: `days_until_expiry` is `-1` within the day after expiry and `0` within the day before, and the text says `under 1d` instead of `0d`, in both directions.
 - `create` stops before asking anything when an env the lockfile records now resolves to another universe in `rbxplace.toml`, as `update`, `regenerate` and `delete` do. It resolved the env afresh and wrote the new universe into the lockfile's shared entry, so the keys created for the old universe no longer showed as drifted.
 
 ## [0.2.0] - 2026-11-10

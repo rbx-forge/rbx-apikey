@@ -156,14 +156,14 @@ pub async fn run(global: &GlobalFlags, remote_check: bool, format: OutputFormat)
                         ),
                         Ok(Some(_)) => {
                             let detail = days
-                                .map(|d| format!("expires in {}d", d))
+                                .map(|d| format!("expires in {}", time_iso::span(d)))
                                 .unwrap_or_else(|| "no expiry".to_string());
                             (Status::Healthy, detail)
                         }
                     }
                 } else {
                     let detail = days
-                        .map(|d| format!("expires in {}d", d))
+                        .map(|d| format!("expires in {}", time_iso::span(d)))
                         .unwrap_or_else(|| "no expiry".to_string());
                     (Status::Healthy, detail)
                 }
@@ -255,14 +255,14 @@ fn local_verdict(
         Some(d) if d < 0 => Some((
             Status::Expired,
             format!(
-                "EXPIRED {}d ago - `rbx-apikey regenerate {}`",
-                d.abs(),
+                "EXPIRED {} ago - `rbx-apikey regenerate {}`",
+                time_iso::span(d),
                 name
             ),
         )),
         Some(d) if d < 7 => Some((
             Status::ExpiringSoon,
-            format!("expires in {}d - rotate soon", d),
+            format!("expires in {} - rotate soon", time_iso::span(d)),
         )),
         _ => None,
     }
@@ -307,5 +307,34 @@ mod tests {
 
         assert_eq!(status.as_str(), "SECRET_UNREADABLE");
         assert!(detail.contains("deploy.env"), "{detail}");
+    }
+
+    /// An expiry passed an hour ago counted as 0 days, and `status` called the
+    /// key EXPIRING_SOON, "expires in 0d".
+    #[test]
+    fn an_expiry_passed_within_the_day_is_expired() {
+        let an_hour_ago = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let entry = lock::LockEntry {
+            cloud_auth_id: "aaaaBBBBccccDDDD".into(),
+            secret: Some("not-a-real-secret".into()),
+            secret_file: None,
+            secret_external: false,
+            creator_id: 1234567890,
+            is_enabled: true,
+            created_at: "now".into(),
+            expires_at: Some(an_hour_ago.clone()),
+        };
+
+        let (status, detail) = local_verdict(
+            &config::Config::default(),
+            None,
+            "deploy",
+            &entry,
+            time_iso::days_until(&an_hour_ago),
+        )
+        .expect("a verdict");
+
+        assert_eq!(status.as_str(), "EXPIRED");
+        assert!(detail.starts_with("EXPIRED under 1d ago"), "{detail}");
     }
 }
