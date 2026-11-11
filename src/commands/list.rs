@@ -277,28 +277,29 @@ fn expiry_line(iso: Option<&str>) -> (String, LineColor, bool) {
         Some(t) => t,
         None => return (format!("{} (unparseable)", iso), LineColor::Yellow, true),
     };
-    let days = (ts - chrono::Utc::now().timestamp()) / 86_400;
+    let days = time_iso::days_until_unix(ts);
+    let span = time_iso::span(days);
     let date = if iso.len() >= 10 { &iso[..10] } else { iso };
     if days < 0 {
         (
-            format!("{} (EXPIRED {}d ago)", date, days.abs()),
+            format!("{} (EXPIRED {} ago)", date, span),
             LineColor::Red,
             true,
         )
     } else if days < 7 {
         (
-            format!("{} (expires in {}d - rotate soon!)", date, days),
+            format!("{} (expires in {} - rotate soon!)", date, span),
             LineColor::Yellow,
             true,
         )
     } else if days < 30 {
         (
-            format!("{} (expires in {}d)", date, days),
+            format!("{} (expires in {})", date, span),
             LineColor::Cyan,
             true,
         )
     } else {
-        (format!("{} (in {}d)", date, days), LineColor::Green, false)
+        (format!("{} (in {})", date, span), LineColor::Green, false)
     }
 }
 
@@ -350,5 +351,22 @@ mod tests {
         let state = secret_state(&file_at(&dir.path().join("deploy.env")), &entry());
         assert!(!state.present && state.readable && state.warn);
         assert!(state.text.contains("MISSING"), "{}", state.text);
+    }
+
+    /// An expiry passed an hour ago read "expires in 0d - rotate soon!", in
+    /// yellow, for a key Roblox already refuses.
+    #[test]
+    fn an_expiry_passed_within_the_day_is_expired() {
+        let an_hour_ago = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let (text, color, warn) = expiry_line(Some(&an_hour_ago));
+        assert!(text.ends_with("(EXPIRED under 1d ago)"), "{text}");
+        assert!(matches!(color, LineColor::Red) && warn);
+
+        let in_an_hour = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let (text, _, _) = expiry_line(Some(&in_an_hour));
+        assert!(
+            text.ends_with("(expires in under 1d - rotate soon!)"),
+            "{text}"
+        );
     }
 }
