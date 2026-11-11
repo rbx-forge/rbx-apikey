@@ -221,10 +221,8 @@ impl Rotation {
 /// The old secret died when Roblox answered, and the new one is stored
 /// nowhere. Left as it was, the entry still pointed at the dead secret, and
 /// `status` and `resolve` served it as the key's.
-fn record_unsaved(lk: &mut lock::Lock, name: &str, mut entry: lock::LockEntry, lock_path: &Path) {
-    entry.mark_unsaved();
-    lock::set(lk, name, entry);
-    if let Err(e) = lock::save_to(lk, lock_path) {
+fn record_unsaved(lk: &mut lock::Lock, name: &str, entry: lock::LockEntry, lock_path: &Path) {
+    if let Err(e) = lock::record_unsaved(lk, name, entry, lock_path) {
         say!(
             "{}",
             format!(
@@ -234,6 +232,24 @@ fn record_unsaved(lk: &mut lock::Lock, name: &str, mut entry: lock::LockEntry, l
             .red()
         );
     }
+}
+
+/// What the lockfile on disk says about a key once Roblox has rotated it and
+/// the save that should have recorded that failed.
+///
+/// Said plainly, because the file looks fine and is wrong: it still describes
+/// the key as it was, and with the lockfile backend it still holds the old
+/// secret, which is dead.
+fn stale_lockfile_note(lock_path: &Path, previous: &secret_store::Backend) -> String {
+    let what = if *previous == secret_store::Backend::Lockfile {
+        "still holds the old secret, which is dead now"
+    } else {
+        "still describes the key as it was before the rotation, and its old secret is dead"
+    };
+    format!(
+        "  {} on disk {what}: do not use what it holds for this key.",
+        lock_path.display()
+    )
 }
 
 /// Rotate one key and store its new secret at `new_resolved`, the destination
@@ -283,8 +299,9 @@ async fn regenerate_one(
             say!(
                 "{}",
                 format!(
-                    "  ✗ Roblox rotated the secret but printing it failed: {e}. \
-                     Run `rbx-apikey regenerate {name} --stdout` again."
+                    "  ✗ Roblox rotated the secret but printing it failed: {e}. Part of it \
+                     may have reached stdout. Run `rbx-apikey regenerate {name} --stdout` \
+                     again."
                 )
                 .red()
             );
@@ -329,6 +346,10 @@ async fn regenerate_one(
                 lock_path.display()
             )
             .red()
+        );
+        say!(
+            "{}",
+            stale_lockfile_note(lock_path, &previous_resolved.backend).red()
         );
         if new_resolved.backend == secret_store::Backend::Lockfile {
             crate::out::hand_over_secret(&new_secret);
@@ -522,7 +543,19 @@ mod tests {
         let entry = lock::get(&on_disk, "deploy").unwrap();
         assert!(entry.secret_unsaved);
         assert!(entry.secret.is_none(), "the dead secret is gone");
-        assert!(entry.secret_file.is_none());
+    }
+
+    /// A lockfile the rotation could not be saved into looks fine and is
+    /// wrong: the message says what it still holds.
+    #[test]
+    fn a_stale_lockfile_is_said_to_hold_a_dead_secret() {
+        let path = Path::new(lock::FILE);
+        let note = stale_lockfile_note(path, &secret_store::Backend::Lockfile);
+        assert!(note.contains("still holds the old secret"), "{note}");
+        assert!(note.contains("dead"), "{note}");
+
+        let note = stale_lockfile_note(path, &secret_store::Backend::File);
+        assert!(note.contains("old secret is dead"), "{note}");
     }
 
     /// `deploy` in the lockfile, `ci` in `.secrets/ci.env`, both declared in a

@@ -21,7 +21,7 @@ Create the key on Roblox and store its secret. Refuses, before creating anything
 
 A failed creation that Roblox reports as `500` prints the scopes it sent: a scope given a target it does not take fails that way.
 
-`--force` on a key the lockfile tracks builds the new key's request first (targets, owners, scopes, IP ranges), then deletes the old key the way `delete` does, then creates the new one, so no key is left live on Roblox without a record and a request that cannot be built leaves the old key working. The keys it replaces are named before the confirmation, and their secrets stop working. A key created by another account is refused before anything happens. If the delete fails, nothing is created and the record stays; a key already deleted in the Creator Hub is replaced. To keep the key and change only its secret, use `regenerate`.
+`--force` on a key the lockfile tracks builds the new key's request first (targets, owners, scopes, IP ranges), then deletes the old key the way `delete` does, then creates the new one, so no key is left live on Roblox without a record and a request that cannot be built leaves the old key working. A name or description containing `rbx` or `roblox` is refused before the delete, since Roblox refuses it; set `name` or `description` on the key to reword it. The keys it replaces are named before the confirmation, and their secrets stop working. A key created by another account is refused before anything happens. If the delete fails, nothing is created and the record stays; a key already deleted in the Creator Hub is replaced. To keep the key and change only its secret, use `regenerate`.
 
 ### rbx-apikey update
 
