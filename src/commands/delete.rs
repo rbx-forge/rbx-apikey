@@ -135,7 +135,7 @@ pub async fn run(
             Path::new(lock::FILE),
         )
         .await;
-        if !done {
+        if done != Deletion::Done {
             failures += 1;
         }
     }
@@ -150,9 +150,8 @@ pub async fn run(
 /// the stored secret. `prune` calls this for its tracked selections so the
 /// cleanup cannot drift between the two commands.
 ///
-/// Returns whether the key is gone and its record with it. On `false` the
-/// failure is already printed, the lockfile on disk is as it was, and the
-/// caller owes a non-zero exit.
+/// Returns what became of the key. Anything but [`Deletion::Done`] is already
+/// printed, and the caller owes a non-zero exit.
 ///
 /// `create --force` calls it too, for the key it replaces, so its lines go
 /// through `say!`: under `create --stdout`, stdout carries the secret alone.
@@ -164,7 +163,7 @@ pub(crate) async fn delete_one(
     skip_confirm: bool,
     clean_files: bool,
     lock_path: &Path,
-) -> bool {
+) -> Deletion {
     let entry = match lock::get(lk, name).cloned() {
         Some(e) => e,
         None => {
@@ -172,7 +171,7 @@ pub(crate) async fn delete_one(
                 "{}",
                 format!("skipping \"{}\": not in {}", name, lock::FILE).yellow()
             );
-            return true;
+            return Deletion::Done;
         }
     };
 
@@ -185,7 +184,7 @@ pub(crate) async fn delete_one(
         .and_then(|a| wrong_account(name, entry.creator_id, a))
     {
         say!("{}", format!("✗ {refusal}").red());
-        return false;
+        return Deletion::NotDeleted;
     }
 
     // The lockfile entry and the secret are the only record that this key
@@ -213,7 +212,7 @@ pub(crate) async fn delete_one(
                 )
                 .red()
             );
-            return false;
+            return Deletion::NotDeleted;
         }
     };
 
@@ -235,7 +234,7 @@ pub(crate) async fn delete_one(
             )
             .red()
         );
-        return false;
+        return Deletion::StillRecorded;
     }
 
     let should_delete_file =
@@ -263,7 +262,21 @@ pub(crate) async fn delete_one(
             format!("✓ \"{}\" deleted (id={})", name, entry.cloud_auth_id).green()
         );
     }
-    true
+    Deletion::Done
+}
+
+/// What [`delete_one`] did with a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Deletion {
+    /// Gone from Roblox, and from the lockfile on disk. Also a key the
+    /// lockfile does not track, which there was nothing to do for.
+    Done,
+    /// Not deleted: refused, or Roblox's delete failed. The key may be live,
+    /// and its record is as it was.
+    NotDeleted,
+    /// Deleted on Roblox, and the lockfile could not be saved, so it still
+    /// lists a key that no longer exists.
+    StillRecorded,
 }
 
 /// Why this session must not delete this key, if it must not.
@@ -330,7 +343,7 @@ mod tests {
         cookie: &str,
         signed_in: u64,
         delete_status: u16,
-    ) -> (bool, lock::Lock, MockServer) {
+    ) -> (Deletion, lock::Lock, MockServer) {
         let (client, server) = signed_in_client(cookie, signed_in, delete_status).await;
 
         let dir = tempfile::tempdir().unwrap();
@@ -402,7 +415,8 @@ mod tests {
         )
         .await;
 
-        assert!(!done);
+        // Told apart from a delete that did not happen: the key is gone.
+        assert_eq!(done, Deletion::StillRecorded);
         assert!(lock::get(&lk, "deploy").is_some());
     }
 
@@ -422,7 +436,7 @@ mod tests {
     async fn the_wrong_account_sends_nothing_and_keeps_the_record() {
         let (done, lk, server) = run_delete("delete-wrong-account", 9876543210, 404).await;
 
-        assert!(!done);
+        assert_eq!(done, Deletion::NotDeleted);
         assert!(lock::get(&lk, "deploy").is_some());
         assert_eq!(delete_requests(&server).await, 0);
     }
@@ -431,7 +445,7 @@ mod tests {
     async fn a_failed_delete_keeps_the_record() {
         let (done, lk, _server) = run_delete("delete-server-error", CREATOR, 400).await;
 
-        assert!(!done);
+        assert_eq!(done, Deletion::NotDeleted);
         assert!(lock::get(&lk, "deploy").is_some());
     }
 
@@ -441,7 +455,7 @@ mod tests {
     async fn a_404_for_the_owner_cleans_the_record() {
         let (done, lk, server) = run_delete("delete-already-gone", CREATOR, 404).await;
 
-        assert!(done);
+        assert_eq!(done, Deletion::Done);
         assert!(lock::get(&lk, "deploy").is_none());
         assert_eq!(delete_requests(&server).await, 1);
     }
@@ -450,7 +464,7 @@ mod tests {
     async fn a_successful_delete_removes_the_record() {
         let (done, lk, _server) = run_delete("delete-success", CREATOR, 200).await;
 
-        assert!(done);
+        assert_eq!(done, Deletion::Done);
         assert!(lock::get(&lk, "deploy").is_none());
     }
 

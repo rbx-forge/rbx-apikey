@@ -79,6 +79,21 @@ pub struct LockEntry {
     pub expires_at: Option<String>,
 }
 
+impl LockEntry {
+    /// Record that this key's secret was never stored, or that the one stored
+    /// is dead: Roblox handed over a secret and nothing could keep it.
+    ///
+    /// Clears `secret` and `secret_file` as well as setting the mark, so a
+    /// build that does not know `secret_unsaved` finds no secret in the entry
+    /// either, rather than a dead or older key's.
+    pub fn mark_unsaved(&mut self) {
+        self.secret = None;
+        self.secret_file = None;
+        self.secret_external = false;
+        self.secret_unsaved = true;
+    }
+}
+
 /// By hand, so `{:?}` on an entry, or on the whole [`Lock`], shows whether a
 /// secret is there and never what it is.
 impl std::fmt::Debug for LockEntry {

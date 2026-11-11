@@ -216,6 +216,26 @@ impl Rotation {
     }
 }
 
+/// Record that a rotated key holds no usable secret here.
+///
+/// The old secret died when Roblox answered, and the new one is stored
+/// nowhere. Left as it was, the entry still pointed at the dead secret, and
+/// `status` and `resolve` served it as the key's.
+fn record_unsaved(lk: &mut lock::Lock, name: &str, mut entry: lock::LockEntry, lock_path: &Path) {
+    entry.mark_unsaved();
+    lock::set(lk, name, entry);
+    if let Err(e) = lock::save_to(lk, lock_path) {
+        say!(
+            "{}",
+            format!(
+                "  ✗ {} could not be saved either, and still points at the dead secret: {e:#}",
+                lock_path.display()
+            )
+            .red()
+        );
+    }
+}
+
 /// Rotate one key and store its new secret at `new_resolved`, the destination
 /// the run planned and the git guard checked.
 async fn regenerate_one(
@@ -268,6 +288,7 @@ async fn regenerate_one(
                 )
                 .red()
             );
+            record_unsaved(lk, name, entry, lock_path);
             return Rotation::Unsaved;
         }
     }
@@ -283,6 +304,7 @@ async fn regenerate_one(
             .red()
         );
         crate::out::hand_over_secret(&new_secret);
+        record_unsaved(lk, name, entry, lock_path);
         return Rotation::Unsaved;
     }
 
@@ -465,6 +487,42 @@ mod tests {
         .await;
 
         assert_eq!(outcome, Rotation::Unsaved);
+    }
+
+    /// Roblox rotated the key and the new secret could not be written. The
+    /// old secret is dead, and the entry still held it, so `status` and
+    /// `resolve` served it. It is marked as having none, on disk.
+    #[tokio::test]
+    async fn a_rotation_whose_secret_could_not_be_written_drops_the_dead_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join(lock::FILE);
+        let mut lk = lock_with_key();
+        lock::save_to(&lk, &lock_path).unwrap();
+        let (client, _server) = rotating("regenerate-write-fails").await;
+        // A directory where the new secret file belongs.
+        let target = dir.path().join("deploy.env");
+        std::fs::create_dir(&target).unwrap();
+        let into_a_directory = secret_store::Resolved {
+            backend: secret_store::Backend::File,
+            target: target.to_string_lossy().to_string(),
+        };
+
+        let outcome = regenerate_one(
+            &mut lk,
+            &client,
+            "deploy",
+            &into_a_directory,
+            true,
+            &lock_path,
+        )
+        .await;
+
+        assert_eq!(outcome, Rotation::Unsaved);
+        let on_disk = lock::load_from(&lock_path).unwrap();
+        let entry = lock::get(&on_disk, "deploy").unwrap();
+        assert!(entry.secret_unsaved);
+        assert!(entry.secret.is_none(), "the dead secret is gone");
+        assert!(entry.secret_file.is_none());
     }
 
     /// `deploy` in the lockfile, `ci` in `.secrets/ci.env`, both declared in a

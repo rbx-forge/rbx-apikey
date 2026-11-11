@@ -147,7 +147,7 @@ pub async fn run(global: &GlobalFlags, opts: PruneOptions) -> Result<()> {
                     Path::new(lock::FILE),
                 )
                 .await;
-                if !done {
+                if done != super::delete::Deletion::Done {
                     failures += 1;
                 }
             }

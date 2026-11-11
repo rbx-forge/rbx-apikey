@@ -11,11 +11,11 @@ use crate::scope_builder::ScopeDef;
 use super::{unreadable_response, RbxApiKeyClient};
 use crate::out::REDACTED;
 
-// The cloud-authentication URLs now come from the client's `ApiBase` so a mock
-// server can stand in for them; see `RbxApiKeyClient::cloud_auth_url`.
-// `introspect` is a different service and stays a literal until something
-// needs it otherwise.
-const INTROSPECT: &str = "https://apis.roblox.com/api-keys/v1/introspect";
+// The URLs come from the client's `ApiBase` so a mock server can stand in for
+// them; see `RbxApiKeyClient::cloud_auth_url`. `introspect` is a different
+// service on the same host, and goes through the base too since a test of
+// `create` needs it answered.
+const INTROSPECT_PATH: &str = "/api-keys/v1/introspect";
 
 // ---------------- Request body shape ----------------
 
@@ -153,7 +153,7 @@ pub struct RemoteProperties {
 /// `cloud_auth_bad_status` is deliberately `Value` rather than a typed enum:
 /// every key measured so far returns `[]`, so the element shape has never been
 /// observed and inventing one is how a deserializer starts dropping fields.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RemoteApiKey {
     pub id: String,
@@ -171,6 +171,31 @@ pub struct RemoteApiKey {
     pub apikey_secret_preview: Option<String>,
     pub cloud_auth_bad_status: Vec<Value>,
     pub cloud_auth_user_configured_properties: Option<RemoteProperties>,
+}
+
+/// By hand: the preview is the start of the secret, so `{:?}` says whether
+/// there is one and not what it is. A listing and the joined `RemoteKey`
+/// print their keys through this.
+impl std::fmt::Debug for RemoteApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteApiKey")
+            .field("id", &self.id)
+            .field("created_time", &self.created_time)
+            .field("updated_time", &self.updated_time)
+            .field("last_generated_time", &self.last_generated_time)
+            .field("owner_id", &self.owner_id)
+            .field("owner_type", &self.owner_type)
+            .field(
+                "apikey_secret_preview",
+                &self.apikey_secret_preview.as_ref().map(|_| REDACTED),
+            )
+            .field("cloud_auth_bad_status", &self.cloud_auth_bad_status)
+            .field(
+                "cloud_auth_user_configured_properties",
+                &self.cloud_auth_user_configured_properties,
+            )
+            .finish()
+    }
 }
 
 impl RemoteApiKey {
@@ -361,7 +386,7 @@ impl RbxApiKeyClient {
         let body = serde_json::to_string(&IntrospectBody { api_key: secret })?;
         let response = self
             .client
-            .post(INTROSPECT)
+            .post(self.base.join(INTROSPECT_PATH))
             .header(header::CONTENT_TYPE, "application/json")
             .body(body)
             .send()
@@ -479,6 +504,20 @@ mod tests {
             assert!(text.contains(REDACTED), "{text}");
         }
         assert!(format!("{created:?}").contains("aaaaBBBBccccDDDD"));
+
+        // The listing's preview is the start of a secret.
+        let listing = ListApiKeysResponse {
+            cloud_auth_info: vec![RemoteApiKey {
+                id: "aaaaBBBBccccDDDD".into(),
+                apikey_secret_preview: Some("not-a-real-preview".into()),
+                ..Default::default()
+            }],
+            next_cursor: None,
+            previous_cursor: None,
+        };
+        let text = format!("{listing:?}");
+        assert!(!text.contains("not-a-real-preview"), "{text}");
+        assert!(text.contains(REDACTED), "{text}");
     }
 
     #[tokio::test]
