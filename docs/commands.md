@@ -8,7 +8,7 @@ Every command except `scopes` authenticates with a [session cookie](reference/au
 
 `rbx-apikey create <key> | --all`
 
-Create the key on Roblox and store its secret. Refuses, before creating anything, if a secret would land in a file git does not ignore.
+Create the key on Roblox and store its secret. Refuses, before creating anything, if a secret would land in a file git does not ignore, or if an env the lockfile records now resolves to another universe in `rbxplace.toml` (as `update`, `regenerate` and `delete` do).
 
 | Flag | Meaning |
 | --- | --- |

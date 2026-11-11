@@ -106,16 +106,14 @@ pub async fn run(
             .collect()
     };
 
-    // What the run will write, decided once. The guard checks it before the
-    // first prompt and before anything is created on Roblox, since refusing
-    // after creation leaves a live key whose secret was never stored, and the
-    // loop below writes exactly that.
-    let plan = plan(&cfg, &lk, &names, force, stdout);
-    super::guard_plan(
-        &plan,
-        super::writes,
+    let plan = prepare(
+        &cfg,
+        &lk,
+        places.as_ref(),
+        &names,
+        force,
+        stdout,
         Path::new(lock::FILE),
-        git_guard::Write::Create,
     )?;
 
     if no_ip {
@@ -160,6 +158,34 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Everything `run` settles before the first question and before Roblox is
+/// asked anything: the drift check, then what the run will write, decided
+/// once and checked against git.
+///
+/// The drift check is the one `update`, `delete` and `regenerate` run. Without
+/// it, `create` resolved a repointed env afresh and wrote the new universe
+/// into the shared `[envs.<name>]` entry, so the keys already created for the
+/// old universe no longer showed as drifted anywhere.
+///
+/// The guard comes before anything is created, since refusing after creation
+/// leaves a live key whose secret was never stored, and the loop in `run`
+/// writes exactly the plan returned.
+#[allow(clippy::too_many_arguments)]
+fn prepare(
+    cfg: &config::Config,
+    lk: &lock::Lock,
+    places: Option<&PlacesFile>,
+    names: &[String],
+    force: bool,
+    stdout: bool,
+    lock_path: &Path,
+) -> Result<super::Plan<secret_store::Resolved>> {
+    crate::drift::check_all(lk, places)?;
+    let plan = plan(cfg, lk, names, force, stdout);
+    super::guard_plan(&plan, super::writes, lock_path, git_guard::Write::Create)?;
+    Ok(plan)
 }
 
 /// Each key of the run and where its secret goes, or why it is skipped: not
@@ -481,7 +507,7 @@ mod tests {
         config::load_from(&path).unwrap()
     }
 
-    /// The run's guard, as `run` calls it: on the plan the loop then follows.
+    /// The run's checks, as `run` makes them, with no `rbxplace.toml`.
     fn guarded(
         cfg: &config::Config,
         lk: &lock::Lock,
@@ -491,12 +517,40 @@ mod tests {
         lock_path: &Path,
     ) -> Result<()> {
         let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
-        super::super::guard_plan(
-            &plan(cfg, lk, &names, force, stdout),
-            super::super::writes,
-            lock_path,
-            git_guard::Write::Create,
-        )
+        prepare(cfg, lk, None, &names, force, stdout, lock_path).map(|_| ())
+    }
+
+    /// `create` ran no drift check while `update`, `delete` and `regenerate`
+    /// did. A lockfile env that `rbxplace.toml` has since repointed stops it
+    /// before anything is asked or created.
+    #[test]
+    fn a_drifted_env_stops_create_before_anything_happens() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = two_destinations(dir.path());
+        let places_path = dir.path().join("rbxplace.toml");
+        std::fs::write(&places_path, "[dev]\nuniverse_id = 200\n").unwrap();
+        let places = PlacesFile::load(&places_path).unwrap();
+        let mut lk = lock::Lock::default();
+        lk.envs.insert(
+            "dev".into(),
+            lock::LockEnv {
+                universe_id: 100,
+                owner_type: rbx_core::owner::OwnerType::User,
+                owner_id: 0,
+            },
+        );
+        let names = vec!["ci".to_string()];
+        let lock_path = dir.path().join(lock::FILE);
+
+        let err = prepare(&cfg, &lk, Some(&places), &names, false, false, &lock_path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'dev'"), "{err}");
+        assert!(err.contains("200"), "{err}");
+
+        // The same env in step with the file is no reason to stop.
+        lk.envs.get_mut("dev").unwrap().universe_id = 200;
+        prepare(&cfg, &lk, Some(&places), &names, false, false, &lock_path).unwrap();
     }
 
     fn tracked_entry() -> lock::LockEntry {
