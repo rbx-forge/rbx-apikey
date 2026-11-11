@@ -221,7 +221,7 @@ async fn create_planned(
     if lock::get(lk, name).is_some() {
         replace_tracked(cfg, lk, client, name, resolved, lock_path).await?;
     }
-    create_one(
+    let created = create_one(
         cfg,
         places,
         lk,
@@ -233,7 +233,17 @@ async fn create_planned(
         skip_verify,
     )
     .await?;
-    lock::save_to(lk, lock_path)
+    // Saved before the run fails on an unsaved secret: the record is what
+    // keeps the key from being live with nothing naming it.
+    lock::save_to(lk, lock_path)?;
+    if created == Created::Unsaved {
+        bail!(
+            "\"{name}\" exists on Roblox and is recorded, but its secret was not stored. The \
+             secret printed above works wherever you save it; `rbx-apikey regenerate {name}` \
+             stores a new one here."
+        );
+    }
+    Ok(())
 }
 
 /// `--force` on a key the lockfile tracks: delete that key on Roblox, and its
@@ -343,7 +353,7 @@ async fn create_one(
     creator_id: u64,
     no_ip: bool,
     skip_verify: bool,
-) -> Result<()> {
+) -> Result<Created> {
     // `plan` skipped the keys that are not declared.
     let key_cfg = config::get(cfg, name)
         .ok_or_else(|| anyhow::anyhow!("\"{name}\" is not in {}", config::FILE))?;
@@ -426,37 +436,52 @@ async fn create_one(
         secret: None,
         secret_file: secret_file_target,
         secret_external: false,
+        secret_unsaved: false,
         creator_id,
         is_enabled,
         created_at: info.created_time.clone().unwrap_or_else(time_iso::iso_now),
         expires_at: expiration_time.clone(),
     };
 
-    if let Err(e) = secret_store::write(resolved, &secret, &mut entry) {
-        bail!(
-            "\"{}\" key created on Roblox but failed to store secret: {}\n  Roblox cloud_auth_id: {}",
-            name,
-            e,
-            info.id
-        );
-    }
-
-    if stdout {
-        // Printed as soon as it is known, before anything else can fail: Roblox
-        // will never show this secret again.
-        crate::out::emit_secret(&secret).map_err(|e| {
-            anyhow::anyhow!(
-                "\"{name}\" key created on Roblox but printing its secret failed: {e}\n  \
-                 Run `rbx-apikey regenerate {name} --stdout` for a new one. \
-                 Roblox cloud_auth_id: {}",
-                info.id
-            )
-        })?;
-    }
+    // Stored where the plan said, or printed under `--stdout` as soon as it is
+    // known, before anything else can fail: Roblox will never show it again.
+    let kept = secret_store::write(resolved, &secret, &mut entry)
+        .map_err(|e| format!("storing its secret failed: {e:#}"))
+        .and_then(|()| {
+            if stdout {
+                crate::out::emit_secret(&secret)
+                    .map_err(|e| format!("printing its secret failed: {e}"))
+            } else {
+                Ok(())
+            }
+        });
 
     // Merge the freshly-synced envs back so other keys' envs persist.
     for (env_name, lock_env) in synced {
         lk.envs.insert(env_name, lock_env);
+    }
+
+    // The key exists on Roblox either way, so it is recorded either way: an
+    // entry is the only thing that keeps it from being a live key nothing
+    // names. One whose secret went nowhere is marked so, and every reader
+    // treats its secret as missing.
+    if let Err(why) = kept {
+        entry.secret = None;
+        entry.secret_external = false;
+        entry.secret_unsaved = true;
+        lock::set(lk, name, entry);
+        say!(
+            "{}",
+            format!(
+                "✗ Roblox created \"{name}\" (id={}) but {why}. It is recorded in {} as \
+                 having no stored secret.",
+                info.id,
+                lock::FILE
+            )
+            .red()
+        );
+        crate::out::hand_over_secret(&secret);
+        return Ok(Created::Unsaved);
     }
     lock::set(lk, name, entry);
 
@@ -481,7 +506,17 @@ async fn create_one(
         verify_against_introspect(client, &secret, &build.scopes).await;
     }
 
-    Ok(())
+    Ok(Created::Stored)
+}
+
+/// What became of a key Roblox created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Created {
+    /// Recorded, and its secret is where the plan said.
+    Stored,
+    /// Recorded as having no stored secret, which was printed on stderr to
+    /// save by hand. The run fails once the record is on disk.
+    Unsaved,
 }
 
 /// The permissions a set of scope entries grants, as comparable triples.
@@ -752,6 +787,48 @@ mod tests {
             assert_eq!(lock::get(&on_disk, "deploy").unwrap().cloud_auth_id, NEW_ID);
         }
 
+        /// Roblox created the key and its secret could not be written. The
+        /// run used to stop there with nothing recorded: a live key nothing
+        /// named. It is recorded, marked as having no stored secret, `status`
+        /// says so, and the run still fails.
+        #[tokio::test]
+        async fn a_secret_that_could_not_be_stored_still_leaves_a_record() {
+            let dir = tempfile::tempdir().unwrap();
+            let (client, _server) = server("create-store-fails", 200).await;
+            let cfg = two_destinations(dir.path());
+            // A directory where `ci`'s secret file belongs: nothing can be
+            // written there.
+            std::fs::create_dir_all(dir.path().join(".secrets").join("ci.env")).unwrap();
+            let lock_path = dir.path().join(lock::FILE);
+            let mut lk = lock::Lock::default();
+
+            let names = vec!["ci".to_string()];
+            let steps = plan(&cfg, &lk, &names, false, false);
+            let resolved = steps[0].1.as_ref().unwrap().clone();
+            let err = create_planned(
+                &cfg, None, &mut lk, &client, "ci", &resolved, CREATOR, true, true, &lock_path,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("its secret was not stored"), "{err}");
+
+            let on_disk = lock::load_from(&lock_path).unwrap();
+            let entry = lock::get(&on_disk, "ci").expect("the live key is recorded");
+            assert_eq!(entry.cloud_auth_id, NEW_ID);
+            assert!(entry.secret_unsaved);
+            assert!(entry.secret.is_none());
+
+            let verdict = crate::commands::status::local_verdict_for_tests(
+                &cfg,
+                config::get(&cfg, "ci"),
+                "ci",
+                entry,
+            );
+            assert_eq!(verdict.0, "SECRET_MISSING");
+            assert!(verdict.1.contains("never stored"), "{}", verdict.1);
+        }
+
         /// Only the planned keys the lockfile tracks are replaced.
         #[test]
         fn the_replaced_keys_are_the_planned_ones_already_tracked() {
@@ -825,6 +902,7 @@ mod tests {
             secret: Some("not-a-real-secret".into()),
             secret_file: None,
             secret_external: false,
+            secret_unsaved: false,
             creator_id: 1234567890,
             is_enabled: true,
             created_at: "now".into(),

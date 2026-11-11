@@ -389,6 +389,7 @@ scopes = ["universe:read"]
             secret: Some("not-a-real-secret".into()),
             secret_file: None,
             secret_external: false,
+            secret_unsaved: false,
             creator_id: CREATOR,
             is_enabled: true,
             created_at: "now".into(),

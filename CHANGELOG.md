@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- When `create` cannot store or print the secret of a key Roblox has just created, the key is still recorded in the lockfile, marked `secret_unsaved = true`, the secret is printed on stderr to save by hand, and the command exits non-zero. It stopped with nothing recorded, leaving a live key that nothing in the project named. `status` shows such a key as `SECRET_MISSING`, "never stored", and `regenerate` clears the mark.
 - `create --force` on a key the lockfile tracks deletes that key on Roblox before creating the new one. It created the new key and wrote it over the record of the old one, which stayed live on Roblox with nothing in the project naming it. The keys it replaces are named before the confirmation; a key of another account is refused before anything happens; a delete that fails creates nothing and keeps the record.
 - A key that expired less than a day ago counts as expired. Days left were rounded toward zero, so it read `in 0d`, `status` called it `EXPIRING_SOON`, `list --remote` and `doctor` showed it active, `prune --expired-only` left it out, and `days_until_expiry` was `0`. Days are now rounded down: `days_until_expiry` is `-1` within the day after expiry and `0` within the day before, and the text says `under 1d` instead of `0d`, in both directions.
 - `can-manage` sends a cookie given with its `.ROBLOSECURITY=` prefix as it is. It added the prefix a second time, and Roblox refused a valid session as a stale cookie.

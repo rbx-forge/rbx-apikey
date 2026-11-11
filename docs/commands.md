@@ -94,7 +94,7 @@ Compare the file, the lockfile and, with `--remote`, Roblox. Changes nothing.
 | `EXPIRED`, `EXPIRING_SOON` | |
 | `ORPHAN_LOCK` | In the lockfile, no longer declared |
 | `ORPHAN_REMOTE` | Gone from Roblox (`--remote` only) |
-| `SECRET_MISSING` | No stored secret (a key printed with `--stdout` is not missing: it is held elsewhere) |
+| `SECRET_MISSING` | No stored secret, including one `create` could not store (a key printed with `--stdout` is not missing: it is held elsewhere) |
 | `SECRET_UNREADABLE` | The secret's file is there and could not be read; the error follows. The other keys are still checked |
 | `DISABLED` | |
 | `CHECK_FAILED` | Roblox could not be asked |

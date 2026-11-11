@@ -235,6 +235,16 @@ fn local_verdict(
                 format!("secret cannot be read: {e:#}"),
             ))
         }
+        Ok(None) if entry.secret_unsaved => {
+            return Some((
+                Status::SecretMissing,
+                format!(
+                    "never stored: Roblox created the key and its secret could not be written - \
+                     `rbx-apikey regenerate {}` stores a new one",
+                    name
+                ),
+            ));
+        }
         Ok(None) if !held_elsewhere => {
             let detail = match resolved.backend {
                 secret_store::Backend::File => {
@@ -268,6 +278,20 @@ fn local_verdict(
     }
 }
 
+/// [`local_verdict`] for another command's tests, with no expiry: the status
+/// word and its detail.
+#[cfg(test)]
+pub(crate) fn local_verdict_for_tests(
+    cfg: &config::Config,
+    key_cfg: Option<&config::KeyConfig>,
+    name: &str,
+    entry: &lock::LockEntry,
+) -> (&'static str, String) {
+    let (status, detail) =
+        local_verdict(cfg, key_cfg, name, entry, None).unwrap_or((Status::Healthy, String::new()));
+    (status.as_str(), detail)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +319,7 @@ mod tests {
             secret: None,
             secret_file: Some(secret_file.to_string_lossy().to_string()),
             secret_external: false,
+            secret_unsaved: false,
             creator_id: 1234567890,
             is_enabled: true,
             created_at: "now".into(),
@@ -319,6 +344,7 @@ mod tests {
             secret: Some("not-a-real-secret".into()),
             secret_file: None,
             secret_external: false,
+            secret_unsaved: false,
             creator_id: 1234567890,
             is_enabled: true,
             created_at: "now".into(),
