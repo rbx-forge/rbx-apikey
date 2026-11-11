@@ -27,7 +27,7 @@ use crate::{config, lock, secret_store, time_iso};
 
 /// One key as this project declares it, joined to whatever the lockfile and the
 /// secret backend know about it.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DeclaredKey {
     /// Name in `rbxapikey.toml`, which is also the lockfile key.
     pub name: String,
@@ -44,6 +44,22 @@ pub struct DeclaredKey {
     /// the diagnosis: `doctor` is often asked about `RBX_API_KEY`, which this
     /// file has nothing to do with.
     pub secret_error: Option<String>,
+}
+
+/// By hand, so `{:?}` says whether the secret was read and never what it is.
+impl std::fmt::Debug for DeclaredKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeclaredKey")
+            .field("name", &self.name)
+            .field("cloud_auth_id", &self.cloud_auth_id)
+            .field("secret_origin", &self.secret_origin)
+            .field(
+                "secret",
+                &self.secret.as_ref().map(|_| crate::out::REDACTED),
+            )
+            .field("secret_error", &self.secret_error)
+            .finish()
+    }
 }
 
 impl DeclaredKey {

@@ -53,7 +53,7 @@ pub struct UniverseOwner {
     pub owner_id: u64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct LockEntry {
     pub cloud_auth_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,6 +70,26 @@ pub struct LockEntry {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+}
+
+/// By hand, so `{:?}` on an entry, or on the whole [`Lock`], shows whether a
+/// secret is there and never what it is.
+impl std::fmt::Debug for LockEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LockEntry")
+            .field("cloud_auth_id", &self.cloud_auth_id)
+            .field(
+                "secret",
+                &self.secret.as_ref().map(|_| crate::out::REDACTED),
+            )
+            .field("secret_file", &self.secret_file)
+            .field("secret_external", &self.secret_external)
+            .field("creator_id", &self.creator_id)
+            .field("is_enabled", &self.is_enabled)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -253,6 +273,31 @@ mod tests {
         assert!(s.contains("secret_external = true"), "{s}");
         let back: LockEntry = toml::from_str(&s).unwrap();
         assert!(back.secret_external);
+    }
+
+    /// `{:?}` on an entry or on the whole lockfile says a secret is there,
+    /// never what it is: a derived `Debug` printed it.
+    #[test]
+    fn debug_shows_that_a_secret_is_there_and_not_what_it_is() {
+        let mut lock = Lock::default();
+        lock.keys.insert(
+            "mykey".to_string(),
+            LockEntry {
+                cloud_auth_id: "abc".into(),
+                secret: Some("not-a-real-secret".into()),
+                secret_file: None,
+                secret_external: false,
+                creator_id: 1,
+                is_enabled: true,
+                created_at: "now".into(),
+                expires_at: None,
+            },
+        );
+
+        let text = format!("{lock:?}");
+        assert!(!text.contains("not-a-real-secret"), "{text}");
+        assert!(text.contains("<redacted>"), "{text}");
+        assert!(text.contains("abc"), "{text}");
     }
 
     #[test]

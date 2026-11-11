@@ -8,7 +8,8 @@ use serde_json::Value;
 
 use crate::scope_builder::ScopeDef;
 
-use super::RbxApiKeyClient;
+use super::{unreadable_response, RbxApiKeyClient};
+use crate::out::REDACTED;
 
 // The cloud-authentication URLs now come from the client's `ApiBase` so a mock
 // server can stand in for them; see `RbxApiKeyClient::cloud_auth_url`.
@@ -44,10 +45,20 @@ struct UpdateBody<'a> {
     props: &'a ConfigProperties,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct IntrospectBody<'a> {
     #[serde(rename = "apiKey")]
     api_key: &'a str,
+}
+
+// The secret-bearing shapes print their secret as `<redacted>` under `{:?}`,
+// so a `dbg!` or a `{:?}` added while debugging cannot put it in a log.
+impl std::fmt::Debug for IntrospectBody<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IntrospectBody")
+            .field("api_key", &REDACTED)
+            .finish()
+    }
 }
 
 /// Body of the list call. Measured against the Creator Hub, which sends exactly
@@ -81,12 +92,21 @@ pub struct CloudAuthInfo {
     pub cloud_auth_user_configured_properties: Option<UserConfiguredProperties>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct CreateApiKeyResponse {
     #[serde(rename = "cloudAuthInfo")]
     pub cloud_auth_info: CloudAuthInfo,
     #[serde(rename = "apikeySecret")]
     pub apikey_secret: String,
+}
+
+impl std::fmt::Debug for CreateApiKeyResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateApiKeyResponse")
+            .field("cloud_auth_info", &self.cloud_auth_info)
+            .field("apikey_secret", &REDACTED)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,10 +115,18 @@ pub struct UpdateApiKeyResponse {
     pub cloud_auth_info: CloudAuthInfo,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct RegenerateResponse {
     #[serde(rename = "apikeySecret")]
     pub apikey_secret: String,
+}
+
+impl std::fmt::Debug for RegenerateResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegenerateResponse")
+            .field("apikey_secret", &REDACTED)
+            .finish()
+    }
 }
 
 // `AuthenticatedUser` was here, a one-field mirror of what
@@ -190,8 +218,7 @@ impl RbxApiKeyClient {
             })
             .await?;
         let text = response.text().await?;
-        serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("failed to parse create response: {}\nBody: {}", e, text))
+        serde_json::from_str(&text).map_err(|e| unreadable_response("create", &e, &text))
     }
 
     pub async fn update_api_key(
@@ -215,8 +242,7 @@ impl RbxApiKeyClient {
             })
             .await?;
         let text = response.text().await?;
-        serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("failed to parse update response: {}\nBody: {}", e, text))
+        serde_json::from_str(&text).map_err(|e| unreadable_response("update", &e, &text))
     }
 
     pub async fn regenerate_secret(&self, cloud_auth_id: &str) -> Result<RegenerateResponse> {
@@ -232,9 +258,7 @@ impl RbxApiKeyClient {
             })
             .await?;
         let text = response.text().await?;
-        serde_json::from_str(&text).map_err(|e| {
-            anyhow::anyhow!("failed to parse regenerate response: {}\nBody: {}", e, text)
-        })
+        serde_json::from_str(&text).map_err(|e| unreadable_response("regenerate", &e, &text))
     }
 
     pub async fn delete_api_key(&self, cloud_auth_id: &str) -> Result<()> {
@@ -268,8 +292,8 @@ impl RbxApiKeyClient {
         if !status.is_success() {
             return Err(roblox_error(status, &body).context(format!("GET {url}")));
         }
-        let v: Value = serde_json::from_str(&body)
-            .map_err(|e| anyhow::anyhow!("failed to parse get response: {}\nBody: {}", e, body))?;
+        let v: Value =
+            serde_json::from_str(&body).map_err(|e| unreadable_response("get", &e, &body))?;
         Ok(Some(v))
     }
 
@@ -307,8 +331,7 @@ impl RbxApiKeyClient {
             })
             .await?;
         let text = response.text().await?;
-        serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("failed to parse list response: {}\nBody: {}", e, text))
+        serde_json::from_str(&text).map_err(|e| unreadable_response("list", &e, &text))
     }
 
     /// Every key, following the cursor to the end.
@@ -348,9 +371,7 @@ impl RbxApiKeyClient {
         if !status.is_success() {
             return Err(roblox_error(status, &text).context("introspecting the key"));
         }
-        serde_json::from_str(&text).map_err(|e| {
-            anyhow::anyhow!("failed to parse introspect response: {}\nBody: {}", e, text)
-        })
+        serde_json::from_str(&text).map_err(|e| unreadable_response("introspect", &e, &text))
     }
 }
 
@@ -379,6 +400,85 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
             .mount(server)
             .await;
+    }
+
+    /// A 2xx whose body does not parse used to come back with the body in the
+    /// error, `apikeySecret` and all, and the error is printed.
+    #[tokio::test]
+    async fn an_unreadable_create_or_regenerate_answer_keeps_its_secret_out_of_the_error() {
+        let server = MockServer::start().await;
+        // `cloudAuthInfo` as a string: serde quotes the string it did not
+        // expect, so the secret is in the parse error as well as the body.
+        let body = serde_json::json!({
+            "cloudAuthInfo": "not-a-real-secret",
+            "apikeySecret": "not-a-real-secret"
+        });
+        Mock::given(method("POST"))
+            .and(path("/cloud-authentication/v1/apiKey"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/cloud-authentication/v1/apiKey/aaaaBBBBccccDDDD/regenerate",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("apikeySecret=not-a-real-secret"),
+            )
+            .mount(&server)
+            .await;
+        let client = client(&server);
+        let props = ConfigProperties {
+            name: "deploy".into(),
+            description: String::new(),
+            is_enabled: true,
+            expiration_time: None,
+            allowed_cidrs: Vec::new(),
+            scopes: Vec::new(),
+        };
+
+        let created = format!("{:#}", client.create_api_key(&props).await.unwrap_err());
+        assert!(!created.contains("not-a-real-secret"), "{created}");
+        assert!(created.contains("create response"), "{created}");
+        assert!(created.contains("top-level fields"), "{created}");
+        assert!(created.contains("cloudAuthInfo"), "{created}");
+
+        let rotated = format!(
+            "{:#}",
+            client
+                .regenerate_secret("aaaaBBBBccccDDDD")
+                .await
+                .unwrap_err()
+        );
+        assert!(!rotated.contains("not-a-real-secret"), "{rotated}");
+        assert!(rotated.contains("regenerate response"), "{rotated}");
+    }
+
+    /// `{:?}` on an answer carrying a secret shows that it is there, not what
+    /// it is.
+    #[test]
+    fn debug_never_prints_a_secret() {
+        let created: CreateApiKeyResponse = serde_json::from_value(serde_json::json!({
+            "cloudAuthInfo": { "id": "aaaaBBBBccccDDDD" },
+            "apikeySecret": "not-a-real-secret"
+        }))
+        .unwrap();
+        let rotated = RegenerateResponse {
+            apikey_secret: "not-a-real-secret".into(),
+        };
+        let asked = IntrospectBody {
+            api_key: "not-a-real-secret",
+        };
+
+        for text in [
+            format!("{created:?}"),
+            format!("{rotated:?}"),
+            format!("{asked:?}"),
+        ] {
+            assert!(!text.contains("not-a-real-secret"), "{text}");
+            assert!(text.contains(REDACTED), "{text}");
+        }
+        assert!(format!("{created:?}").contains("aaaaBBBBccccDDDD"));
     }
 
     #[tokio::test]
