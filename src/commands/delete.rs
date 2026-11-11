@@ -153,6 +153,9 @@ pub async fn run(
 /// Returns whether the key is gone and its record with it. On `false` the
 /// failure is already printed, the lockfile on disk is as it was, and the
 /// caller owes a non-zero exit.
+///
+/// `create --force` calls it too, for the key it replaces, so its lines go
+/// through `say!`: under `create --stdout`, stdout carries the secret alone.
 pub(crate) async fn delete_one(
     cfg: &config::Config,
     lk: &mut lock::Lock,
@@ -165,7 +168,7 @@ pub(crate) async fn delete_one(
     let entry = match lock::get(lk, name).cloned() {
         Some(e) => e,
         None => {
-            println!(
+            say!(
                 "{}",
                 format!("skipping \"{}\": not in {}", name, lock::FILE).yellow()
             );
@@ -181,7 +184,7 @@ pub(crate) async fn delete_one(
         .as_ref()
         .and_then(|a| wrong_account(name, entry.creator_id, a))
     {
-        println!("{}", format!("✗ {refusal}").red());
+        say!("{}", format!("✗ {refusal}").red());
         return false;
     }
 
@@ -194,7 +197,7 @@ pub(crate) async fn delete_one(
         // what `account` being known and past the check above establishes. From
         // anywhere else Roblox gives the same answer about a key that is live.
         Err(e) if account.is_some() && is_api_status(&e, StatusCode::NOT_FOUND) => {
-            println!(
+            say!(
                 "{}",
                 format!("\"{name}\" no longer exists on Roblox, removing the local record: {e}")
                     .yellow()
@@ -202,7 +205,7 @@ pub(crate) async fn delete_one(
             true
         }
         Err(e) => {
-            println!(
+            say!(
                 "{}",
                 format!(
                     "✗ \"{name}\": Roblox delete failed, nothing removed, so the key may still \
@@ -223,7 +226,7 @@ pub(crate) async fn delete_one(
         // Memory follows the disk. Left out of it, the entry would vanish
         // with the next key's save, right after being reported as still there.
         lock::set(lk, name, entry.clone());
-        println!(
+        say!(
             "{}",
             format!(
                 "✗ \"{name}\" is deleted on Roblox, but {} could not be saved and still lists \
@@ -248,14 +251,14 @@ pub(crate) async fn delete_one(
 
     let cleanup = secret_store::cleanup(&resolved, should_delete_file);
     for msg in &cleanup.auto_cleaned {
-        println!("{}", format!("  ✓ {}", msg).green());
+        say!("{}", format!("  ✓ {}", msg).green());
     }
     for msg in &cleanup.manual_action_needed {
-        println!("{}", format!("  ⚠ {}", msg).yellow());
+        say!("{}", format!("  ⚠ {}", msg).yellow());
     }
 
     if !already_gone {
-        println!(
+        say!(
             "{}",
             format!("✓ \"{}\" deleted (id={})", name, entry.cloud_auth_id).green()
         );
@@ -268,7 +271,11 @@ pub(crate) async fn delete_one(
 /// A key belongs to the account that created it, and Roblox answers 404 to any
 /// other, the same answer it gives for a key that no longer exists. Sending the
 /// request would prove nothing, and the lockfile already knows the answer.
-fn wrong_account(name: &str, creator_id: u64, account: &SessionAccount) -> Option<String> {
+pub(crate) fn wrong_account(
+    name: &str,
+    creator_id: u64,
+    account: &SessionAccount,
+) -> Option<String> {
     (account.id != creator_id).then(|| {
         format!(
             "\"{name}\" was created by account {creator_id}, and this session is {}. Roblox \

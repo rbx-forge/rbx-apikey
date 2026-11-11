@@ -14,12 +14,14 @@ Create the key on Roblox and store its secret. Refuses, before creating anything
 | --- | --- |
 | `--all` | Every declared key |
 | `--no-ip` | Allow every IP address |
-| `--force` | Overwrite an existing lockfile entry |
+| `--force` | Replace a key the lockfile already tracks: that key is deleted on Roblox first, then a new one is created. See below |
 | `--no-verify` | Skip the check that Roblox stored what was asked |
 | `--yes` | Skip the confirmation |
 | `--stdout` | Print the secret on stdout instead of storing it. One key, not with `--all`. See [Secret storage](reference/secrets.md#straight-to-a-vault) |
 
 A failed creation that Roblox reports as `500` prints the scopes it sent: a scope given a target it does not take fails that way.
+
+`--force` on a key the lockfile tracks deletes that key the way `delete` does, then creates the new one, so no key is left live on Roblox without a record. The keys it replaces are named before the confirmation, and their secrets stop working. A key created by another account is refused before anything happens. If the delete fails, nothing is created and the record stays; a key already deleted in the Creator Hub is replaced. To keep the key and change only its secret, use `regenerate`.
 
 ### rbx-apikey update
 

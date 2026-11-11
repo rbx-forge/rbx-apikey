@@ -146,10 +146,6 @@ pub fn load_from(path: &Path) -> Result<Lock> {
     Ok(lock)
 }
 
-pub fn save(lock: &Lock) -> Result<()> {
-    save_to(lock, Path::new(FILE))
-}
-
 pub fn save_to(lock: &Lock, path: &Path) -> Result<()> {
     let s = toml::to_string_pretty(lock).context("failed to serialize lock file")?;
     // The default secret backend keeps the key secret in this file.

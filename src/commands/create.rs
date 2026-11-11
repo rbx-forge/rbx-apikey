@@ -88,7 +88,7 @@ pub async fn run(
             say!("All keys in rbxapikey.toml already have entries in the lockfile.");
             say!("  → rotate secret:   rbx-apikey regenerate <key>");
             say!("  → update config:   rbx-apikey update <key>");
-            say!("  → start fresh:     rbx-apikey create <key> --force");
+            say!("  → replace the key: rbx-apikey create <key> --force (deletes it first)");
             return Ok(());
         }
 
@@ -122,6 +122,37 @@ pub async fn run(
 
     let account = client.authenticated_account().await?;
     let creator_id = account.id;
+
+    // `--force` on a key the lockfile tracks deletes that key first. Said
+    // before the question, and refused here when the key belongs to another
+    // account: Roblox would answer 404 to the delete and the key would stay.
+    let replaced = replaced_keys(&plan, &lk);
+    let refusals: Vec<String> = replaced
+        .iter()
+        .filter_map(|(n, entry)| super::delete::wrong_account(n, entry.creator_id, &account))
+        .collect();
+    if !refusals.is_empty() {
+        bail!(
+            "{}\nNothing has been created or deleted.",
+            refusals.join("\n")
+        );
+    }
+    if !replaced.is_empty() {
+        let list: Vec<String> = replaced
+            .iter()
+            .map(|(n, entry)| format!("\"{n}\" (id={})", entry.cloud_auth_id))
+            .collect();
+        say!(
+            "{}",
+            format!(
+                "--force replaces {}: each is deleted on Roblox before its new key is created, \
+                 and its current secret stops working.",
+                list.join(", ")
+            )
+            .yellow()
+        );
+    }
+
     let what = match (all, name) {
         (true, _) => "every key in rbxapikey.toml".to_string(),
         (false, Some(n)) => format!("\"{n}\""),
@@ -140,7 +171,7 @@ pub async fn run(
         match step {
             Err(note) => say!("{}", note.yellow()),
             Ok(resolved) => {
-                create_one(
+                create_planned(
                     &cfg,
                     places.as_ref(),
                     &mut lk,
@@ -150,13 +181,97 @@ pub async fn run(
                     creator_id,
                     no_ip,
                     skip_verify,
+                    Path::new(lock::FILE),
                 )
-                .await?;
-                lock::save(&lk)?;
+                .await?
             }
         }
     }
 
+    Ok(())
+}
+
+/// The keys of the plan that `--force` replaces: planned, and already in the
+/// lockfile. Without `--force` the plan skips those, so this is empty.
+fn replaced_keys<'a>(
+    plan: &'a super::Plan<secret_store::Resolved>,
+    lk: &'a lock::Lock,
+) -> Vec<(&'a str, &'a lock::LockEntry)> {
+    plan.iter()
+        .filter(|(_, step)| step.is_ok())
+        .filter_map(|(n, _)| lock::get(lk, n).map(|entry| (n.as_str(), entry)))
+        .collect()
+}
+
+/// One planned key: the key it replaces deleted first, if the lockfile
+/// tracks one under this name, then the new key created and recorded.
+#[allow(clippy::too_many_arguments)]
+async fn create_planned(
+    cfg: &config::Config,
+    places: Option<&PlacesFile>,
+    lk: &mut lock::Lock,
+    client: &RbxApiKeyClient,
+    name: &str,
+    resolved: &secret_store::Resolved,
+    creator_id: u64,
+    no_ip: bool,
+    skip_verify: bool,
+    lock_path: &Path,
+) -> Result<()> {
+    if lock::get(lk, name).is_some() {
+        replace_tracked(cfg, lk, client, name, resolved, lock_path).await?;
+    }
+    create_one(
+        cfg,
+        places,
+        lk,
+        client,
+        name,
+        resolved,
+        creator_id,
+        no_ip,
+        skip_verify,
+    )
+    .await?;
+    lock::save_to(lk, lock_path)
+}
+
+/// `--force` on a key the lockfile tracks: delete that key on Roblox, and its
+/// record with it, before the new one is created.
+///
+/// `--force` used to create the new key and write it over the record of the
+/// old one, which stayed live on Roblox with nothing here naming it: an
+/// untracked credential that only `prune` could find. Deleting first means a
+/// failure at any step leaves no live key without a record. A delete that
+/// fails creates nothing and keeps the record; a create that fails after the
+/// delete leaves no key under the name, and `create` makes one.
+///
+/// This goes through `delete`'s own path, so it refuses a key of another
+/// account and reads a 404 for the owner as a key already gone.
+async fn replace_tracked(
+    cfg: &config::Config,
+    lk: &mut lock::Lock,
+    client: &RbxApiKeyClient,
+    name: &str,
+    resolved: &secret_store::Resolved,
+    lock_path: &Path,
+) -> Result<()> {
+    let stored = lock::get(lk, name)
+        .map(|entry| secret_store::stored_backend(cfg, config::get(cfg, name), name, Some(entry)));
+    say!("Replacing \"{name}\": deleting the key the lockfile tracks first.");
+    // The old secret file goes with the key when the new secret is written to
+    // the same file anyway. One elsewhere is named and left for the reader.
+    let clean_files = stored
+        .as_ref()
+        .is_some_and(|old| !secret_store::backend_differs(old, resolved));
+    let deleted =
+        super::delete::delete_one(cfg, lk, client, name, true, clean_files, lock_path).await;
+    if !deleted {
+        bail!(
+            "\"{name}\": the key --force replaces could not be deleted, so no new key was \
+             created and the lockfile still records the old one. The reason is above."
+        );
+    }
     Ok(())
 }
 
@@ -204,7 +319,8 @@ fn plan(
             let step = match config::get(cfg, n) {
                 None => Err(super::missing_key_note(cfg, n)),
                 Some(_) if lock::get(lk, n).is_some() && !force => Err(format!(
-                    "skipping \"{}\": already in {} (use --force to overwrite)",
+                    "skipping \"{}\": already in {} (--force replaces it, deleting the key it \
+                     tracks first)",
                     n,
                     lock::FILE
                 )),
@@ -505,6 +621,156 @@ mod tests {
         )
         .unwrap();
         config::load_from(&path).unwrap()
+    }
+
+    mod force {
+        use super::*;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const CREATOR: u64 = 1234567890;
+        const OLD_ID: &str = "aaaaBBBBccccDDDD";
+        const NEW_ID: &str = "eeeeFFFFggggHHHH";
+
+        /// A signed-in client and a server that deletes `OLD_ID` with
+        /// `delete_status` and creates `NEW_ID`. The cookie is per test: the
+        /// session check caches by cookie.
+        async fn server(cookie: &str, delete_status: u16) -> (RbxApiKeyClient, MockServer) {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/users/authenticated"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({ "id": CREATOR, "name": "someone" })),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("DELETE"))
+                .and(path(format!("/cloud-authentication/v1/apiKey/{OLD_ID}")))
+                .respond_with(ResponseTemplate::new(delete_status).set_body_string("{}"))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/cloud-authentication/v1/apiKey"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "cloudAuthInfo": { "id": NEW_ID },
+                    "apikeySecret": "the-new-secret"
+                })))
+                .mount(&server)
+                .await;
+            let client = RbxApiKeyClient::new(Some(cookie.to_string()))
+                .with_base_url(server.uri())
+                .with_users_base_url(server.uri());
+            // As `run` does before the loop: the delete needs the account.
+            client.authenticated_account().await.unwrap();
+            (client, server)
+        }
+
+        /// `create deploy --force` on a tracked `deploy`, against `server`,
+        /// with the lockfile on disk in `dir`.
+        async fn force_create(client: &RbxApiKeyClient, dir: &Path) -> (Result<()>, lock::Lock) {
+            let cfg = two_destinations(dir);
+            let lock_path = dir.join(lock::FILE);
+            let mut lk = lock::Lock::default();
+            let mut old = tracked_entry();
+            old.cloud_auth_id = OLD_ID.into();
+            old.creator_id = CREATOR;
+            lock::set(&mut lk, "deploy", old);
+            lock::save_to(&lk, &lock_path).unwrap();
+
+            let names = vec!["deploy".to_string()];
+            let steps = plan(&cfg, &lk, &names, true, false);
+            let resolved = steps[0].1.as_ref().unwrap().clone();
+            let outcome = create_planned(
+                &cfg, None, &mut lk, client, "deploy", &resolved, CREATOR, true, true, &lock_path,
+            )
+            .await;
+            (outcome, lock::load_from(&lock_path).unwrap())
+        }
+
+        async fn requests(server: &MockServer, verb: &str) -> Vec<String> {
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.method.as_str() != "GET")
+                .map(|r| format!("{} {}", r.method, r.url.path()))
+                .filter(|r| r.starts_with(verb) || verb.is_empty())
+                .collect()
+        }
+
+        /// The bug: `--force` created a second key and wrote it over the
+        /// record of the first, which stayed live on Roblox and untracked.
+        /// The old key is deleted first, and the lockfile ends up naming the
+        /// new one.
+        #[tokio::test]
+        async fn force_deletes_the_tracked_key_before_creating_its_replacement() {
+            let dir = tempfile::tempdir().unwrap();
+            let (client, server) = server("create-force-replaces", 200).await;
+
+            let (outcome, on_disk) = force_create(&client, dir.path()).await;
+
+            outcome.unwrap();
+            assert_eq!(
+                requests(&server, "").await,
+                vec![
+                    format!("DELETE /cloud-authentication/v1/apiKey/{OLD_ID}"),
+                    "POST /cloud-authentication/v1/apiKey".to_string(),
+                ]
+            );
+            let entry = lock::get(&on_disk, "deploy").unwrap();
+            assert_eq!(entry.cloud_auth_id, NEW_ID);
+            assert_eq!(entry.secret.as_deref(), Some("the-new-secret"));
+        }
+
+        /// A delete Roblox refuses may have left the old key live, so nothing
+        /// is created and its record stays.
+        #[tokio::test]
+        async fn a_failed_delete_creates_nothing_and_keeps_the_record() {
+            let dir = tempfile::tempdir().unwrap();
+            let (client, server) = server("create-force-delete-fails", 400).await;
+
+            let (outcome, on_disk) = force_create(&client, dir.path()).await;
+
+            let err = outcome.unwrap_err().to_string();
+            assert!(err.contains("no new key was created"), "{err}");
+            assert!(requests(&server, "POST").await.is_empty());
+            assert_eq!(lock::get(&on_disk, "deploy").unwrap().cloud_auth_id, OLD_ID);
+        }
+
+        /// A key deleted in the Creator Hub answers 404 to its owner: gone
+        /// already, which is the case `--force` is most often reached for.
+        #[tokio::test]
+        async fn a_key_already_gone_is_replaced() {
+            let dir = tempfile::tempdir().unwrap();
+            let (client, _server) = server("create-force-already-gone", 404).await;
+
+            let (outcome, on_disk) = force_create(&client, dir.path()).await;
+
+            outcome.unwrap();
+            assert_eq!(lock::get(&on_disk, "deploy").unwrap().cloud_auth_id, NEW_ID);
+        }
+
+        /// Only the planned keys the lockfile tracks are replaced.
+        #[test]
+        fn the_replaced_keys_are_the_planned_ones_already_tracked() {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = two_destinations(dir.path());
+            let mut lk = lock::Lock::default();
+            lock::set(&mut lk, "deploy", tracked_entry());
+            let names: Vec<String> = ["ci", "deploy"].map(String::from).to_vec();
+
+            let forced = plan(&cfg, &lk, &names, true, false);
+            let replaced: Vec<&str> = replaced_keys(&forced, &lk)
+                .iter()
+                .map(|(n, _)| *n)
+                .collect();
+            assert_eq!(replaced, vec!["deploy"]);
+
+            let unforced = plan(&cfg, &lk, &names, false, false);
+            assert!(replaced_keys(&unforced, &lk).is_empty());
+        }
     }
 
     /// The run's checks, as `run` makes them, with no `rbxplace.toml`.
