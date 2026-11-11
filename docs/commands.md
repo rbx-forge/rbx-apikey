@@ -1,6 +1,6 @@
 # Commands
 
-Every command except `scopes` authenticates with a [session cookie](reference/authentication.md): Roblox's key administration is not on Open Cloud.
+The commands that change keys or read them from the account (`create`, `update`, `regenerate`, `delete`, `prune`, `list --remote`, `status --remote` and `can-manage`) authenticate with a [session cookie](reference/authentication.md): Roblox's key administration is not on Open Cloud. `doctor` uses it to check the session and to find the key on the account. `list`, `status`, `resolve`, `introspect`, `scopes` and `catalog` need none: they read this project's files, or authenticate with the key's secret.
 
 ## Lifecycle
 

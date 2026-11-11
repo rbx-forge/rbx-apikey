@@ -24,7 +24,7 @@ Credentials
   ✓ session         live: signed in as builderman (156)
 
 Key validity
-  · identified as  "deploy" (this project): opsdev_deploy on Roblox
+  · identified as  "deploy" (this project): myproject_deploy on Roblox
   ✓ expiry         2026-11-12T09:00:00Z (in 90d)
 
 Scope coverage

@@ -13,6 +13,9 @@
 - A key that expired less than a day ago counts as expired. Days left were rounded toward zero, so it read `in 0d`, `status` called it `EXPIRING_SOON`, `list --remote` and `doctor` showed it active, `prune --expired-only` left it out, and `days_until_expiry` was `0`. Days are now rounded down: `days_until_expiry` is `-1` within the day after expiry and `0` within the day before, and the text says `under 1d` instead of `0d`, in both directions.
 - `can-manage` sends a cookie given with its `.ROBLOSECURITY=` prefix as it is. It added the prefix a second time, and Roblox refused a valid session as a stale cookie.
 - `introspect` no longer asks to use a signed-in Studio session. It authenticates with the key's secret alone and never sent the cookie it asked for.
+- A lockfile of an older schema is refused with advice that deletes the keys it records before anything recreates them. The advice was to delete the file and run `create --all`, which gave every key a second one and left the first live with no record. A lockfile of a newer schema asks for a newer build.
+- The configuration docs said to accept a repointed env by deleting the key's lockfile entry, which leaves the key live with no record and makes the next `create` a duplicate. The section to delete is `[envs.<name>]`, which is what the refusal itself says.
+- `regenerate --help` no longer says `--yes` is required with `--all`: without it, `--all` asks before rotating.
 - `create` stops before asking anything when an env the lockfile records now resolves to another universe in `rbxplace.toml`, as `update`, `regenerate` and `delete` do. It resolved the env afresh and wrote the new universe into the lockfile's shared entry, so the keys created for the old universe no longer showed as drifted.
 
 ## [0.2.0] - 2026-11-10

@@ -269,7 +269,7 @@ pub struct Totals {
 #[derive(Debug, Serialize)]
 pub struct RemoteKeyEntry {
     /// The name on Roblox, which is not necessarily the lockfile's name for it:
-    /// `name_prefix` makes `viewer` into `prodread_viewer` on purpose.
+    /// `name_prefix` makes `viewer` into `myproject_viewer` on purpose.
     pub name: String,
     /// `active`, `expired` or `disabled`, the one-word state the human listing
     /// paints as a glyph.
@@ -464,7 +464,7 @@ mod tests {
 
     fn entry(expires_at: Option<&str>) -> LockEntry {
         LockEntry {
-            cloud_auth_id: "f58b4055-cafe-4e2f-9c2a-000000000001".into(),
+            cloud_auth_id: "aaaaaaaa-bbbb-4ccc-8ddd-000000000001".into(),
             // A real secret in the fixture, so the leak assertions below have
             // something to find if a field ever starts carrying one.
             secret: Some("RBX-S3CR3T-must-never-be-serialised".into()),
@@ -480,7 +480,7 @@ mod tests {
     fn remote_key(name: &str, tracked: Tracked) -> RemoteKey {
         RemoteKey {
             info: RemoteApiKey {
-                id: "f58b4055-cafe-4e2f-9c2a-000000000001".into(),
+                id: "aaaaaaaa-bbbb-4ccc-8ddd-000000000001".into(),
                 created_time: Some("2026-08-03T09:15:00.123Z".into()),
                 apikey_secret_preview: Some("RBX-S3CR3T".into()),
                 cloud_auth_user_configured_properties: Some(RemoteProperties {
@@ -513,7 +513,7 @@ mod tests {
         assert_eq!(doc["keys"][0]["name"], "deploy");
         assert_eq!(doc["keys"][0]["declared"], true);
         assert_eq!(doc["keys"][0]["created"], true);
-        assert_eq!(doc["keys"][0]["id"], "f58b4055-cafe-4e2f-9c2a-000000000001");
+        assert_eq!(doc["keys"][0]["id"], "aaaaaaaa-bbbb-4ccc-8ddd-000000000001");
         assert_eq!(doc["keys"][0]["creator_id"], "1234567890");
         assert_eq!(doc["keys"][0]["universe_ids"][0], "5544332211");
         assert_eq!(doc["keys"][0]["universe_ids"][1], "66778899001");
@@ -652,7 +652,7 @@ mod tests {
     #[test]
     fn a_remote_listing_carries_the_account_and_the_tally() {
         let keys = [
-            remote_key("prodread_viewer", Tracked::Yes("viewer".into())),
+            remote_key("myproject_viewer", Tracked::Yes("viewer".into())),
             remote_key("otherproject_shop", Tracked::No),
         ];
         let doc = parsed(&RemoteListDocument::new(
@@ -668,7 +668,7 @@ mod tests {
         assert_eq!(doc["totals"]["total"], 2);
         assert_eq!(doc["totals"]["tracked"], 1);
         assert_eq!(doc["totals"]["untracked"], 1);
-        assert_eq!(doc["keys"][0]["name"], "prodread_viewer");
+        assert_eq!(doc["keys"][0]["name"], "myproject_viewer");
         assert_eq!(doc["keys"][0]["state"], "active");
         assert_eq!(doc["keys"][0]["tracked"], true);
         // The lockfile's name for it, which is not the name on Roblox.
@@ -684,7 +684,7 @@ mod tests {
     /// entries this document writes.
     #[test]
     fn the_secret_preview_never_reaches_the_remote_document() {
-        let keys = [remote_key("prodread_viewer", Tracked::No)];
+        let keys = [remote_key("myproject_viewer", Tracked::No)];
         let rendered = parsed(&RemoteListDocument::new(None, 1, &keys, Vec::new())).to_string();
 
         for absent in ["RBX-S3CR3T", "S3CR3T", "preview", "secret"] {

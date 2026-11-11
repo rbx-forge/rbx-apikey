@@ -216,14 +216,14 @@ mod tests {
     use serde_json::json;
 
     /// The shape Roblox actually returned on 2026-08-16, copied from a live
-    /// response. This is the fixture the parser exists for, and the one no
+    /// response with its values replaced. This is the fixture the parser exists for, and the one no
     /// test had before, because every other fixture in this crate was written
     /// by this crate.
     fn live_response() -> serde_json::Value {
         json!({
             "authorizedUserId": 1234567890,
             "enabled": true,
-            "name": "opsdev_shoptest",
+            "name": "myproject_shop",
             "scopes": [
                 {
                     "name": "developer-product",

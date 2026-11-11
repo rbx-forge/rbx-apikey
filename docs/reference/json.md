@@ -19,7 +19,7 @@ Optional fields are absent rather than `null`. `schema_version` is `1`.
       "name": "deploy",
       "declared": true,
       "created": true,
-      "id": "f58b4055-cafe-4e2f-9c2a-000000000001",
+      "id": "aaaaaaaa-bbbb-4ccc-8ddd-000000000001",
       "creator_id": "1234567890",
       "universe_ids": ["5544332211"],
       "expires_at": "2027-08-01T10:00:00.000Z",
