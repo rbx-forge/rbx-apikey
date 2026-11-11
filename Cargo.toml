@@ -40,7 +40,7 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 colored = "2"
-dialoguer = "0.11"
+dialoguer = "0.12"
 # Same major as `rbx-core`, so the `reqwest::Client` it builds is the type this
 # crate sends requests with. TLS is whatever `rbx-core` selects, which is
 # rustls over the OS trust store: no OpenSSL to find at launch.
