@@ -2,7 +2,7 @@
 
 Roblox's API key administration is not on Open Cloud, so `rbx-apikey` authenticates with a `.ROBLOSECURITY` session cookie, taken in this order:
 
-1. `--cookie <value>` or `RBX_COOKIE`;
+1. `--cookie <value>` or `RBX_COOKIE`, with or without the `.ROBLOSECURITY=` prefix;
 2. a signed-in local Roblox Studio, **only if you say yes**: an interactive run asks once, a run with nobody to ask refuses. `--auto-cookie` is the standing yes, `--no-auto-cookie` the standing no (it never overrides a cookie you passed).
 
 When the Studio session is used, a line on stderr says so. The cookie is held in memory for the run and sent only to Roblox; it is never written anywhere.

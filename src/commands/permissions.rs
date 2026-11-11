@@ -92,16 +92,7 @@ pub async fn run(global: &GlobalFlags, places: &[u64]) -> Result<()> {
     let mut refused = 0;
 
     for universe_id in targets {
-        let url = format!("{DEVELOP_HOST}/v1/universes/{universe_id}/permissions");
-        let result: Result<UniversePermissions> = execute_json(|| {
-            let request = client
-                .get(&url)
-                .header("Cookie", format!(".ROBLOSECURITY={cookie}"));
-            async move { request.send().await.map_err(Into::into) }
-        })
-        .await;
-
-        match result {
+        match universe_permissions(&client, DEVELOP_HOST, universe_id, &cookie).await {
             Ok(permissions) => {
                 let verdict = if permissions.can_manage {
                     "yes".green().bold()
@@ -148,4 +139,55 @@ pub async fn run(global: &GlobalFlags, places: &[u64]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// What `develop` says the cookie's account may do on `universe_id`.
+///
+/// The header goes through `session::cookie_header`, the normalisation every
+/// other call applies: a cookie pasted with its `.ROBLOSECURITY=` prefix was
+/// prefixed a second time here, and Roblox answered 401 to a valid session.
+async fn universe_permissions(
+    client: &reqwest::Client,
+    host: &str,
+    universe_id: u64,
+    cookie: &str,
+) -> Result<UniversePermissions> {
+    let url = format!("{host}/v1/universes/{universe_id}/permissions");
+    let header = rbx_core::session::cookie_header(cookie);
+    execute_json(|| {
+        let request = client.get(&url).header("Cookie", &header);
+        async move { request.send().await.map_err(Into::into) }
+    })
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// The cookie leaves with one prefix, whether it was pasted with one or
+    /// without.
+    #[tokio::test]
+    async fn the_cookie_is_prefixed_once_whichever_form_it_came_in() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/universes/1234567890/permissions"))
+            .and(header("cookie", ".ROBLOSECURITY=not-a-real-cookie"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "canManage": true })),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        let client = build_client_with_user_agent(USER_AGENT);
+
+        for pasted in ["not-a-real-cookie", ".ROBLOSECURITY=not-a-real-cookie"] {
+            let answer = universe_permissions(&client, &server.uri(), 1234567890, pasted)
+                .await
+                .unwrap_or_else(|e| panic!("{pasted}: {e:#}"));
+            assert!(answer.can_manage);
+        }
+    }
 }
