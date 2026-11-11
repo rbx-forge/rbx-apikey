@@ -38,24 +38,34 @@ pub fn days_until(iso: &str) -> Option<i64> {
     Some(days_until_unix(parse_iso_to_unix(iso)?))
 }
 
-/// Whole days from now until the Unix time `ts`, rounded down.
+/// Whole days from now until the Unix time `ts`: negative once it has passed.
 ///
-/// Down, not toward zero: `0` is under a day left and `-1` is passed within
-/// the last day. Toward zero, a key that expired an hour ago came out as `0`,
-/// which reads "in 0d" and which every `< 0` check took for a live key.
+/// A future time counts the whole days left, `0` being under a day. A time
+/// now or past is `-1 - (whole days since)`: `-1` from the moment of expiry
+/// until a day later, `-2` from exactly one day after. So `< 0` is "expired"
+/// from the expiry itself, and [`span`] gives back the whole days since.
+///
+/// Rounded toward zero, as it once was, a key that expired an hour ago came
+/// out as `0`, which reads "in 0d" and which every `< 0` check took for a live
+/// key.
 pub fn days_until_unix(ts: i64) -> i64 {
     days_between(Utc::now().timestamp(), ts)
 }
 
 fn days_between(now: i64, ts: i64) -> i64 {
-    (ts - now).div_euclid(86_400)
+    const DAY: i64 = 86_400;
+    if ts > now {
+        (ts - now) / DAY
+    } else {
+        -((now - ts) / DAY) - 1
+    }
 }
 
 /// A day count from [`days_until`] as the time it spans: `12d`, or `under 1d`.
 ///
-/// Rounded down both ways, so a past count gives the whole days since: `-1`
-/// (passed within the last day) is `under 1d`, `-3` is `2d`. The caller says
-/// which way it points: "in {span}", "expired {span} ago".
+/// Whole days both ways: a past count gives the whole days since expiry, so
+/// `-1` (expired within the last day) is `under 1d` and `-3` is `2d`. The
+/// caller says which way it points: "in {span}", "expired {span} ago".
 pub fn span(days: i64) -> String {
     let whole = if days < 0 { -days - 1 } else { days };
     if whole == 0 {
@@ -77,8 +87,19 @@ mod tests {
     #[test]
     fn an_expiry_passed_less_than_a_day_ago_is_in_the_past() {
         assert_eq!(days_between(NOW, NOW - 3600), -1);
-        assert_eq!(days_between(NOW, NOW - DAY), -1);
-        assert_eq!(days_between(NOW, NOW - DAY - 1), -2);
+        assert_eq!(days_between(NOW, NOW - DAY + 1), -1);
+        assert_eq!(days_between(NOW, NOW - DAY), -2);
+    }
+
+    /// The boundaries: an expiry this very second has passed, and one
+    /// exactly N days ago reads N days.
+    #[test]
+    fn an_expiry_now_is_expired_and_n_days_ago_reads_n_days() {
+        assert!(days_between(NOW, NOW) < 0);
+        assert_eq!(span(days_between(NOW, NOW)), "under 1d");
+        assert_eq!(span(days_between(NOW, NOW - DAY)), "1d");
+        assert_eq!(span(days_between(NOW, NOW - 3 * DAY)), "3d");
+        assert_eq!(span(days_between(NOW, NOW + 3 * DAY)), "3d");
     }
 
     #[test]

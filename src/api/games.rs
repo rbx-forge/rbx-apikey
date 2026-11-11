@@ -125,14 +125,7 @@ impl RbxApiKeyClient {
                 status
             );
         }
-        let info: DevelopUniverseInfo = serde_json::from_str(&body).map_err(|e| {
-            anyhow::anyhow!(
-                "universe {}: failed to parse develop response: {}\nBody: {}",
-                universe_id,
-                e,
-                body
-            )
-        })?;
+        let info = parse_develop(universe_id, &body)?;
         if info.creator_target_id == 0 {
             bail!(
                 "universe {}: develop API response missing creatorTargetId",
@@ -149,5 +142,27 @@ impl RbxApiKeyClient {
             owner_type,
             owner_id: info.creator_target_id,
         })
+    }
+}
+
+/// The develop answer about a universe, or an error that quotes none of it,
+/// like every other answer this crate reads.
+fn parse_develop(universe_id: u64, body: &str) -> Result<DevelopUniverseInfo> {
+    serde_json::from_str(body)
+        .map_err(|e| super::unreadable_response("develop", &e, body))
+        .with_context(|| format!("universe {universe_id}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unreadable_develop_answer_is_not_quoted() {
+        let body = r#"{"creatorType": ["not-a-real-value"]}"#;
+        let text = format!("{:#}", parse_develop(1234567890, body).unwrap_err());
+        assert!(!text.contains("not-a-real-value"), "{text}");
+        assert!(text.contains("universe 1234567890"), "{text}");
+        assert!(text.contains("develop response"), "{text}");
     }
 }

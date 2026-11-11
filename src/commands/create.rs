@@ -203,8 +203,9 @@ fn replaced_keys<'a>(
         .collect()
 }
 
-/// One planned key: the key it replaces deleted first, if the lockfile
-/// tracks one under this name, then the new key created and recorded.
+/// One planned key: the request built and checked, then the key it replaces
+/// deleted, if the lockfile tracks one under this name, then the new key
+/// created and recorded.
 #[allow(clippy::too_many_arguments)]
 async fn create_planned(
     cfg: &config::Config,
@@ -218,24 +219,22 @@ async fn create_planned(
     skip_verify: bool,
     lock_path: &Path,
 ) -> Result<()> {
+    let prepared = prepare_key(cfg, places, lk, client, name, no_ip).await?;
     if lock::get(lk, name).is_some() {
         replace_tracked(cfg, lk, client, name, resolved, lock_path).await?;
     }
-    let created = create_one(
-        cfg,
-        places,
+    // Records the key on disk itself, whatever became of its secret.
+    let created = create_prepared(
         lk,
         client,
         name,
         resolved,
         creator_id,
-        no_ip,
         skip_verify,
+        prepared,
+        lock_path,
     )
     .await?;
-    // Saved before the run fails on an unsaved secret: the record is what
-    // keeps the key from being live with nothing naming it.
-    lock::save_to(lk, lock_path)?;
     if created == Created::Unsaved {
         bail!(
             "\"{name}\" exists on Roblox and is recorded, but its secret was not stored. The \
@@ -254,7 +253,9 @@ async fn create_planned(
 /// untracked credential that only `prune` could find. Deleting first means a
 /// failure at any step leaves no live key without a record. A delete that
 /// fails creates nothing and keeps the record; a create that fails after the
-/// delete leaves no key under the name, and `create` makes one.
+/// delete leaves no key under the name, and `create` makes one. The caller
+/// builds the new request before this runs, so what can fail on this side
+/// has failed with the old key still working.
 ///
 /// This goes through `delete`'s own path, so it refuses a key of another
 /// account and reads a 404 for the owner as a key already gone.
@@ -274,15 +275,22 @@ async fn replace_tracked(
     let clean_files = stored
         .as_ref()
         .is_some_and(|old| !secret_store::backend_differs(old, resolved));
-    let deleted =
-        super::delete::delete_one(cfg, lk, client, name, true, clean_files, lock_path).await;
-    if !deleted {
-        bail!(
+    use super::delete::Deletion;
+    match super::delete::delete_one(cfg, lk, client, name, true, clean_files, lock_path).await {
+        Deletion::Done => Ok(()),
+        Deletion::NotDeleted => bail!(
             "\"{name}\": the key --force replaces could not be deleted, so no new key was \
-             created and the lockfile still records the old one. The reason is above."
-        );
+             created and the lockfile still records the old one, which may be live. The reason \
+             is above."
+        ),
+        Deletion::StillRecorded => bail!(
+            "\"{name}\": the key --force replaces is deleted on Roblox, but {} could not be \
+             saved and still lists it, so no new key was created. Once the file can be \
+             written, `rbx-apikey delete {name}` clears the record (Roblox answers 404) and \
+             `rbx-apikey create {name}` makes the new key.",
+            lock_path.display()
+        ),
     }
-    Ok(())
 }
 
 /// Everything `run` settles before the first question and before Roblox is
@@ -342,22 +350,35 @@ fn plan(
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn create_one(
+/// One key's creation request, built and checked in full before anything on
+/// Roblox changes.
+#[derive(Debug)]
+struct Prepared {
+    payload: ConfigProperties,
+    /// The lockfile `[envs]` entries behind the targets, merged in once the
+    /// key exists.
+    synced: std::collections::BTreeMap<String, lock::LockEnv>,
+}
+
+/// Everything about the new key that can fail on this side: its targets and
+/// their owners, its scopes, its CIDRs, its name and description.
+///
+/// Done before `--force` deletes the key it replaces, so a creation that was
+/// going to fail here fails with the old key still working. The name and the
+/// description are only built: Roblox alone decides whether it takes them
+/// (see `explain_invalid_name_or_description`), and that answer comes with the
+/// creation itself.
+async fn prepare_key(
     cfg: &config::Config,
     places: Option<&PlacesFile>,
-    lk: &mut lock::Lock,
+    lk: &lock::Lock,
     client: &RbxApiKeyClient,
     name: &str,
-    resolved: &secret_store::Resolved,
-    creator_id: u64,
     no_ip: bool,
-    skip_verify: bool,
-) -> Result<Created> {
+) -> Result<Prepared> {
     // `plan` skipped the keys that are not declared.
     let key_cfg = config::get(cfg, name)
         .ok_or_else(|| anyhow::anyhow!("\"{name}\" is not in {}", config::FILE))?;
-    let stdout = resolved.backend == secret_store::Backend::External;
 
     // Sync this key's targets into the lockfile's shared `[envs.X]` table.
     // `sync_targets` does the `rbxplace.toml` lookup and reuses cached owners
@@ -374,22 +395,38 @@ async fn create_one(
     }
 
     let cidrs = build_cidrs(cfg, key_cfg, name, no_ip)?;
-    let expiration_time = config::get_expiration_time(cfg, key_cfg);
-    let is_enabled = config::is_enabled(cfg, key_cfg);
-
     let payload = ConfigProperties {
         name: config::resolve_remote_name(cfg, key_cfg, name),
         description: build_description(name, key_cfg, &universe_ids),
-        is_enabled,
-        expiration_time: expiration_time.clone(),
-        allowed_cidrs: cidrs.clone(),
-        scopes: build.scopes.clone(),
+        is_enabled: config::is_enabled(cfg, key_cfg),
+        expiration_time: config::get_expiration_time(cfg, key_cfg),
+        allowed_cidrs: cidrs,
+        scopes: build.scopes,
     };
+    Ok(Prepared { payload, synced })
+}
+
+/// Create the prepared key, store its secret, and record it on disk at once.
+#[allow(clippy::too_many_arguments)]
+async fn create_prepared(
+    lk: &mut lock::Lock,
+    client: &RbxApiKeyClient,
+    name: &str,
+    resolved: &secret_store::Resolved,
+    creator_id: u64,
+    skip_verify: bool,
+    prepared: Prepared,
+    lock_path: &Path,
+) -> Result<Created> {
+    let Prepared { payload, synced } = prepared;
+    let stdout = resolved.backend == secret_store::Backend::External;
+    let expiration_time = payload.expiration_time.clone();
+    let is_enabled = payload.is_enabled;
 
     say!(
         "Creating \"{}\"... ({} scope entries)",
         name,
-        build.scopes.len()
+        payload.scopes.len()
     );
 
     let resp: CreateApiKeyResponse = client
@@ -466,9 +503,7 @@ async fn create_one(
     // names. One whose secret went nowhere is marked so, and every reader
     // treats its secret as missing.
     if let Err(why) = kept {
-        entry.secret = None;
-        entry.secret_external = false;
-        entry.secret_unsaved = true;
+        entry.mark_unsaved();
         lock::set(lk, name, entry);
         say!(
             "{}",
@@ -480,10 +515,19 @@ async fn create_one(
             )
             .red()
         );
-        crate::out::hand_over_secret(&secret);
+        match piped_note(name, stdout) {
+            Some(note) => say!("{}", note.yellow()),
+            None => crate::out::hand_over_secret(&secret),
+        }
+        record(lk, lock_path, name, &info.id, None)?;
         return Ok(Created::Unsaved);
     }
     lock::set(lk, name, entry);
+    // On disk now, before the introspect check below: a hang or a Ctrl-C
+    // there must not leave a live key nothing records.
+    let only_in_the_lockfile =
+        (resolved.backend == secret_store::Backend::Lockfile).then_some(secret.as_str());
+    record(lk, lock_path, name, &info.id, only_in_the_lockfile)?;
 
     let where_str = match resolved.backend {
         secret_store::Backend::File => format!(" (secret → {})", resolved.target),
@@ -503,10 +547,52 @@ async fn create_one(
     );
 
     if !skip_verify {
-        verify_against_introspect(client, &secret, &build.scopes).await;
+        verify_against_introspect(client, &secret, &payload.scopes).await;
     }
 
     Ok(Created::Stored)
+}
+
+/// What replaces the secret on stderr when it was meant for `--stdout`, or
+/// `None` when the secret itself is handed over there.
+///
+/// Under `--stdout` the secret is never put on stderr: that is the stream a
+/// CI job logs, and the secret was meant for a pipe. The way out is a new one,
+/// as `regenerate` says when its own printing fails.
+fn piped_note(name: &str, piped: bool) -> Option<String> {
+    piped.then(|| {
+        format!(
+            "  Run `rbx-apikey regenerate {name} --stdout` for a new secret; this one is not \
+             printed anywhere."
+        )
+    })
+}
+
+/// Write the lockfile that now records a key Roblox has just created.
+///
+/// A save that fails leaves the key live with nothing naming it, so the error
+/// says so with its id. `secret_only_here` is the secret when the lockfile was
+/// its only copy: it is handed over on stderr, as `regenerate` does, since
+/// Roblox will not show it again.
+fn record(
+    lk: &lock::Lock,
+    lock_path: &Path,
+    name: &str,
+    id: &str,
+    secret_only_here: Option<&str>,
+) -> Result<()> {
+    let Err(e) = lock::save_to(lk, lock_path) else {
+        return Ok(());
+    };
+    if let Some(secret) = secret_only_here {
+        crate::out::hand_over_secret(secret);
+    }
+    bail!(
+        "\"{name}\" is live on Roblox (id={id}), but {} could not be saved, so nothing here \
+         records it: {e:#}. Once the file can be written, `rbx-apikey prune --untracked-only` \
+         can delete it.",
+        lock_path.display()
+    )
 }
 
 /// What became of a key Roblox created.
@@ -704,6 +790,16 @@ mod tests {
         /// `create deploy --force` on a tracked `deploy`, against `server`,
         /// with the lockfile on disk in `dir`.
         async fn force_create(client: &RbxApiKeyClient, dir: &Path) -> (Result<()>, lock::Lock) {
+            force_create_with(client, dir, true).await
+        }
+
+        /// The same, with `no_ip` as given: without it, `deploy` has no CIDRs
+        /// and its request cannot be built.
+        async fn force_create_with(
+            client: &RbxApiKeyClient,
+            dir: &Path,
+            no_ip: bool,
+        ) -> (Result<()>, lock::Lock) {
             let cfg = two_destinations(dir);
             let lock_path = dir.join(lock::FILE);
             let mut lk = lock::Lock::default();
@@ -717,10 +813,136 @@ mod tests {
             let steps = plan(&cfg, &lk, &names, true, false);
             let resolved = steps[0].1.as_ref().unwrap().clone();
             let outcome = create_planned(
-                &cfg, None, &mut lk, client, "deploy", &resolved, CREATOR, true, true, &lock_path,
+                &cfg, None, &mut lk, client, "deploy", &resolved, CREATOR, no_ip, true, &lock_path,
             )
             .await;
             (outcome, lock::load_from(&lock_path).unwrap())
+        }
+
+        /// A creation that was going to fail on this side deleted the working
+        /// key first. The request is built and checked before anything on
+        /// Roblox changes.
+        #[tokio::test]
+        async fn a_request_that_cannot_be_built_deletes_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            let (client, server) = server("create-force-no-cidrs", 200).await;
+
+            let (outcome, on_disk) = force_create_with(&client, dir.path(), false).await;
+
+            let err = format!("{:#}", outcome.unwrap_err());
+            assert!(err.contains("allowed_cidrs"), "{err}");
+            assert!(requests(&server, "").await.is_empty(), "nothing was sent");
+            assert_eq!(lock::get(&on_disk, "deploy").unwrap().cloud_auth_id, OLD_ID);
+        }
+
+        /// The old key went, and the lockfile could not record that: told
+        /// apart from a delete that did not happen, since the key is gone.
+        #[tokio::test]
+        async fn a_delete_the_lockfile_could_not_record_says_the_old_key_is_gone() {
+            let dir = tempfile::tempdir().unwrap();
+            let (client, server) = server("create-force-unrecorded", 200).await;
+            let cfg = two_destinations(dir.path());
+            // A directory where the lockfile belongs: nothing can be written.
+            let lock_path = dir.path().join(lock::FILE);
+            std::fs::create_dir(&lock_path).unwrap();
+            let mut lk = lock::Lock::default();
+            let mut old = tracked_entry();
+            old.cloud_auth_id = OLD_ID.into();
+            old.creator_id = CREATOR;
+            lock::set(&mut lk, "deploy", old);
+            let names = vec!["deploy".to_string()];
+            let resolved = plan(&cfg, &lk, &names, true, false)[0]
+                .1
+                .as_ref()
+                .unwrap()
+                .clone();
+
+            let err = create_planned(
+                &cfg, None, &mut lk, &client, "deploy", &resolved, CREATOR, true, true, &lock_path,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+            assert!(err.contains("is deleted on Roblox"), "{err}");
+            assert!(requests(&server, "POST").await.is_empty());
+        }
+
+        /// A lockfile that cannot be saved once Roblox has created the key: the
+        /// key is live and nothing records it, so the error says so with its id.
+        #[tokio::test]
+        async fn a_record_that_cannot_be_saved_names_the_live_key() {
+            let dir = tempfile::tempdir().unwrap();
+            let (client, _server) = server("create-record-fails", 200).await;
+            let cfg = two_destinations(dir.path());
+            let lock_path = dir.path().join(lock::FILE);
+            std::fs::create_dir(&lock_path).unwrap();
+            let mut lk = lock::Lock::default();
+            let names = vec!["deploy".to_string()];
+            let resolved = plan(&cfg, &lk, &names, false, false)[0]
+                .1
+                .as_ref()
+                .unwrap()
+                .clone();
+
+            let err = create_planned(
+                &cfg, None, &mut lk, &client, "deploy", &resolved, CREATOR, true, true, &lock_path,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+            assert!(
+                err.contains(&format!("is live on Roblox (id={NEW_ID})")),
+                "{err}"
+            );
+        }
+
+        /// The record is on disk before the introspect check: a hang or a
+        /// Ctrl-C there left a live key nothing recorded.
+        #[tokio::test]
+        async fn the_key_is_recorded_before_the_introspect_check() {
+            let dir = tempfile::tempdir().unwrap();
+            let (client, server) = server("create-record-before-verify", 200).await;
+            Mock::given(method("POST"))
+                .and(path("/api-keys/v1/introspect"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(30)),
+                )
+                .mount(&server)
+                .await;
+            let cfg = two_destinations(dir.path());
+            let lock_path = dir.path().join(lock::FILE);
+            let mut lk = lock::Lock::default();
+            let names = vec!["deploy".to_string()];
+            let resolved = plan(&cfg, &lk, &names, false, false)[0]
+                .1
+                .as_ref()
+                .unwrap()
+                .clone();
+
+            // Stopped while the check hangs, as a Ctrl-C would stop it.
+            let stopped = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                create_planned(
+                    &cfg, None, &mut lk, &client, "deploy", &resolved, CREATOR, true, false,
+                    &lock_path,
+                ),
+            )
+            .await;
+            assert!(stopped.is_err(), "the check should still be hanging");
+
+            let on_disk = lock::load_from(&lock_path).unwrap();
+            assert_eq!(lock::get(&on_disk, "deploy").unwrap().cloud_auth_id, NEW_ID);
+        }
+
+        /// Under `--stdout` a secret nothing kept is never handed over on
+        /// stderr, which a CI job logs; the reader is sent to rotate instead.
+        #[test]
+        fn a_piped_secret_is_never_handed_over_on_stderr() {
+            let note = piped_note("deploy", true).expect("a note instead of the secret");
+            assert!(note.contains("regenerate deploy --stdout"), "{note}");
+            assert!(piped_note("deploy", false).is_none());
         }
 
         async fn requests(server: &MockServer, verb: &str) -> Vec<String> {
@@ -817,7 +1039,9 @@ mod tests {
             let entry = lock::get(&on_disk, "ci").expect("the live key is recorded");
             assert_eq!(entry.cloud_auth_id, NEW_ID);
             assert!(entry.secret_unsaved);
+            // Nothing a build that ignores the mark could take for a secret.
             assert!(entry.secret.is_none());
+            assert!(entry.secret_file.is_none());
 
             let verdict = crate::commands::status::local_verdict_for_tests(
                 &cfg,

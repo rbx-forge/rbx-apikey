@@ -33,7 +33,7 @@ Optional fields are absent rather than `null`. `schema_version` is `1`.
 }
 ```
 
-`secret_backend` is `lockfile`, `file`, or `external` for a key printed with `--stdout` (then `secret_present` is `false`: the secret is not held here). `secret_readable` is `false` when the secret's file is there and could not be read; `secret_present` is then `false` too, and the error, which names the file, is in the human form only. `declared` without `created` is pending; `created` without `declared` is an orphan. Lockfile fields are absent for a key never created. `days_until_expiry` is the whole days left, rounded down: `0` is under a day left, and it is negative once past, `-1` within the last day. It is absent without expiry. Not combinable with `--expiry-only`.
+`secret_backend` is `lockfile`, `file`, or `external` for a key printed with `--stdout` (then `secret_present` is `false`: the secret is not held here). `secret_readable` is `false` when the secret's file is there and could not be read; `secret_present` is then `false` too, and the error, which names the file, is in the human form only. `declared` without `created` is pending; `created` without `declared` is an orphan. Lockfile fields are absent for a key never created. `days_until_expiry` is the whole days left, `0` being under a day. From the second of expiry it is negative: `-1` within the first day after, then `-1` minus the whole days since. It is absent without expiry. Not combinable with `--expiry-only`.
 
 ## rbx-apikey list --remote --json
 
@@ -58,7 +58,7 @@ Optional fields are absent rather than `null`. `schema_version` is `1`.
 }
 ```
 
-`state` is `active`, `expired` or `disabled`. `tracked_as` is the lockfile name. `missing_on_account` lists lockfile keys Roblox no longer has. `days_until_expiry` is rounded down, as in `list --json`.
+`state` is `active`, `expired` or `disabled`. `tracked_as` is the lockfile name. `missing_on_account` lists lockfile keys Roblox no longer has. `days_until_expiry` counts as in `list --json`.
 
 ## rbx-apikey status --json
 
@@ -75,7 +75,7 @@ Optional fields are absent rather than `null`. `schema_version` is `1`.
 }
 ```
 
-`healthy` is `true` only for `HEALTHY`. `status` takes the values listed under [`rbx-apikey status`](../commands.md#rbx-apikey-status), `SECRET_UNREADABLE` among them. `remote` says whether Roblox was asked (`ORPHAN_REMOTE` needs it). `days_until_expiry` is rounded down, as in `list --json`. A drift between the lockfile and `rbxplace.toml` fails before any document.
+`healthy` is `true` only for `HEALTHY`. `status` takes the values listed under [`rbx-apikey status`](../commands.md#rbx-apikey-status), `SECRET_UNREADABLE` among them. `remote` says whether Roblox was asked (`ORPHAN_REMOTE` needs it). `days_until_expiry` counts as in `list --json`. A drift between the lockfile and `rbxplace.toml` fails before any document.
 
 ```sh
 rbx-apikey status --json | jq -r '.keys[] | select(.healthy | not) | "\(.name): \(.status)"'

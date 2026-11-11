@@ -246,12 +246,7 @@ fn withhold_quoted(text: &str) -> String {
 // off and the second auto-detected anyway. One chain cannot diverge from
 // itself, so the only one is `rbx_core::env`.
 
-/// The session preflight, from this crate's side.
-///
-/// What `rbx-core` owns (the statuses, the caching, the wording) is tested
-/// there. What this owns is that its client asks the right host with the right
-/// cookie, that the creator-id lookup and the preflight are the same question,
-/// and that a refusal comes back as one.
+/// [`unreadable_response`] keeps every value of an answer out of its error.
 #[cfg(test)]
 mod unreadable_tests {
     use super::*;
@@ -297,6 +292,12 @@ mod unreadable_tests {
     }
 }
 
+/// The session preflight, from this crate's side.
+///
+/// What `rbx-core` owns (the statuses, the caching, the wording) is tested
+/// there. What this owns is that its client asks the right host with the right
+/// cookie, that the creator-id lookup and the preflight are the same question,
+/// and that a refusal comes back as one.
 #[cfg(test)]
 mod session_tests {
     use super::*;
