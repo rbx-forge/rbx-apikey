@@ -49,7 +49,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
-schemars = { version = "0.8", default-features = false, features = ["derive"], optional = true }
+schemars = { version = "1.2", default-features = false, features = ["derive"], optional = true }
 # The HTTP client with its retry policy, the Roblox session check, the Studio
 # cookie lookup with its consent prompt, `rbxplace.toml` parsing and the
 # lockfile writer. A release tag: Cargo.lock pins the commit it names, and a
