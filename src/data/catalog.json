@@ -1,6 +1,6 @@
 {
-  "version": "2026-11-05",
-  "source_url": "https://github.com/Roblox/creator-docs/blob/b032c6ba6763d57ace62e0a04b3b48650f50fbab/content/en-us/reference/cloud/openapi.json",
+  "version": "2026-11-14",
+  "source_url": "https://github.com/Roblox/creator-docs/blob/5a56d0d361d709aa785585b738354134ae47b4ae/content/en-us/reference/cloud/openapi.json",
   "authority_url": "https://apis.roblox.com/cloud-authentication/v1/scopes",
   "scopes": {
     "ad.billing": {
@@ -143,6 +143,27 @@
       ],
       "target_type": "none"
     },
+    "marketplace.item": {
+      "operations": [
+        "publish",
+        "read",
+        "write"
+      ],
+      "target_type": "none"
+    },
+    "marketplace.item-appeal": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "none"
+    },
+    "marketplace.item-upload-fee": {
+      "operations": [
+        "read"
+      ],
+      "target_type": "none"
+    },
     "memory-store": {
       "operations": [
         "flush",
@@ -164,6 +185,12 @@
         "write"
       ],
       "target_type": "universe"
+    },
+    "notification-report": {
+      "operations": [
+        "write"
+      ],
+      "target_type": "none"
     },
     "studio-evaluations": {
       "operations": [
@@ -244,6 +271,19 @@
       "target_type": "universe"
     },
     "universe.event": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
+    "universe.following": {
+      "operations": [
+        "write"
+      ],
+      "target_type": "none"
+    },
+    "universe.notification-string": {
       "operations": [
         "read",
         "write"
