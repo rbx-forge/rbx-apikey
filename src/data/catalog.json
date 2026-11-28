@@ -1,6 +1,6 @@
 {
-  "version": "2026-11-22",
-  "source_url": "https://github.com/Roblox/creator-docs/blob/a23352b27af917e55e165e4d42583580700d1fbf/content/en-us/reference/cloud/openapi.json",
+  "version": "2026-11-28",
+  "source_url": "https://github.com/Roblox/creator-docs/blob/47ec857d6a0805124d089d3a2f68d970ccbf70d0/content/en-us/reference/cloud/openapi.json",
   "authority_url": "https://apis.roblox.com/cloud-authentication/v1/scopes",
   "scopes": {
     "ad.billing": {
@@ -80,6 +80,18 @@
       ],
       "target_type": "none",
       "description": "Group forum categories, posts, comments."
+    },
+    "group.payout": {
+      "operations": [
+        "read"
+      ],
+      "target_type": "universe"
+    },
+    "group.permission": {
+      "operations": [
+        "read"
+      ],
+      "target_type": "none"
     },
     "legacy-asset": {
       "operations": [
@@ -178,6 +190,13 @@
       ],
       "target_type": "universe"
     },
+    "memory-store.hash-map": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "universe"
+    },
     "memory-store.queue": {
       "operations": [
         "add",
@@ -199,6 +218,31 @@
       ],
       "target_type": "none"
     },
+    "ownership-transfer": {
+      "operations": [
+        "read",
+        "write"
+      ],
+      "target_type": "creator"
+    },
+    "research": {
+      "operations": [
+        "query"
+      ],
+      "target_type": "creator"
+    },
+    "research.role": {
+      "operations": [
+        "read"
+      ],
+      "target_type": "creator"
+    },
+    "scope": {
+      "operations": [
+        "read"
+      ],
+      "target_type": "none"
+    },
     "studio-evaluations": {
       "operations": [
         "create"
@@ -213,6 +257,7 @@
     },
     "universe": {
       "operations": [
+        "publish",
         "read",
         "write"
       ],
